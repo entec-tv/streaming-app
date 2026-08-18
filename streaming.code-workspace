@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../streaming-admin"
+		},
+		{
+			"path": "../streaming-nest"
+		}
+	],
+	"settings": {}
+}

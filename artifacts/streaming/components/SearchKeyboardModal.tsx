@@ -1,10 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, Modal, StyleSheet, TextInput } from 'react-native';
+import { View, Text, Modal, StyleSheet, TextInput, useWindowDimensions, Platform } from 'react-native';
 import { TVKeyboard } from './TVKeyboard';
 import QRCode from 'react-native-qrcode-svg';
 import { listenToRemoteKeyboard } from '@/store/firebase';
 import { useColors } from '@/hooks/useColors';
 import { TVFocusable } from './TVFocusable';
+import { useTranslation } from '@/hooks/useTranslation';
 
 interface SearchKeyboardModalProps {
   visible: boolean;
@@ -16,9 +17,12 @@ interface SearchKeyboardModalProps {
 }
 
 export function SearchKeyboardModal({ visible, value, onChangeText, onClose, placeholder, inline = false }: SearchKeyboardModalProps) {
+  const { t } = useTranslation();
   const colors = useColors();
   const remoteSessionId = useRef(Math.random().toString(36).substring(2, 6).toUpperCase()).current;
   const [internalValue, setInternalValue] = useState(value);
+  const { width } = useWindowDimensions();
+  const isSmallScreen = width < 768 && !Platform.isTV;
 
   // Sync internal value when prop changes (if it changes from outside)
   useEffect(() => {
@@ -43,84 +47,103 @@ export function SearchKeyboardModal({ visible, value, onChangeText, onClose, pla
 
   const content = (
     <View style={[inline ? styles.inlineContainer : styles.overlay, !inline && { backgroundColor: 'rgba(0,0,0,0.85)' }]}>
-      <View style={[styles.contentRow, inline && { flexDirection: 'column', gap: 16 }, !inline && { transform: [{ scale: 0.75 }] }]}>
+      <View style={[styles.contentRow, inline && { flexDirection: 'column', gap: 16 }, !inline && !isSmallScreen && { transform: [{ scale: 0.75 }] }]}>
         
         {/* Keyboard Section */}
-        <View style={{ width: inline ? '100%' : 480, maxWidth: 480, paddingHorizontal: inline ? 16 : 0 }}>
+        <View style={{ width: inline || isSmallScreen ? '100%' : 480, maxWidth: isSmallScreen ? 600 : 480, paddingHorizontal: inline || isSmallScreen ? 16 : 0, alignSelf: 'center' }}>
           <TextInput
             value={internalValue}
             onChangeText={handleChangeText}
             placeholder={placeholder || 'Search...'}
             placeholderTextColor={colors.mutedForeground}
-            style={[styles.placeholder, { color: colors.gold, backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 12, paddingHorizontal: 16 }]}
+            style={[styles.placeholder, { color: colors.text, backgroundColor: colors.surface, borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, borderWidth: 1, borderColor: colors.border }]}
             autoFocus={true}
-            showSoftInputOnFocus={false}
+            showSoftInputOnFocus={isSmallScreen}
             onSubmitEditing={onClose}
             returnKeyType="search"
           />
-          <TVKeyboard 
-            value={internalValue}
-            onChangeText={handleChangeText}
-            onSubmit={onClose}
-            autoFocus={true}
-            suggestions={[]}
-          />
+          {!isSmallScreen && (
+            <TVKeyboard 
+              value={internalValue}
+              onChangeText={handleChangeText}
+              onSubmit={onClose}
+              autoFocus={true}
+              suggestions={[]}
+            />
+          )}
         </View>
         
-        {/* QR Code Section */}
-        <View style={[styles.qrContainer, inline && { flexDirection: 'row', padding: 16, width: '100%', maxWidth: 480, justifyContent: 'space-between', alignItems: 'center' }, { backgroundColor: 'rgba(255,255,255,0.05)', borderColor: colors.border }]}>
-          {inline ? (
-            <>
-              <View style={{ flex: 1, alignItems: 'flex-start' }}>
-                <Text style={[styles.qrTitle, { color: colors.text, marginBottom: 4 }]}>Remote Search</Text>
-                <Text style={[styles.qrSessionId, { color: colors.gold, marginBottom: 12, fontSize: 20 }]}>{remoteSessionId}</Text>
+        {/* QR Code Section - Hidden on small screens */}
+        {!isSmallScreen && (
+          <View style={[styles.qrContainer, inline && { flexDirection: 'row', padding: 16, width: '100%', maxWidth: 480, justifyContent: 'space-between', alignItems: 'center' }, { backgroundColor: colors.surface, borderColor: colors.border, borderRadius: 14 }]}>
+            {inline ? (
+              <>
+                <View style={{ flex: 1, alignItems: 'flex-start' }}>
+                  <Text style={[styles.qrTitle, { color: colors.text, marginBottom: 4 }]}>{t('remote_search')}</Text>
+                  <Text style={[styles.qrSessionId, { color: colors.gold, marginBottom: 12, fontSize: 20 }]}>{remoteSessionId}</Text>
+                  
+                  <TVFocusable 
+                    onPress={onClose}
+                    style={({ focused }: any) => [
+                      styles.closeBtn,
+                      { backgroundColor: focused ? colors.gold : colors.card, paddingVertical: 8, paddingHorizontal: 24, borderWidth: 1, borderColor: colors.border }
+                    ]}
+                  >
+                    {({ focused }: any) => (
+                      <Text style={[styles.closeBtnText, { color: focused ? '#000' : colors.text }]}>Close</Text>
+                    )}
+                  </TVFocusable>
+                </View>
+                <View style={[styles.qrCodeWrapper, { marginBottom: 0, padding: 8 }]}>
+                  <QRCode 
+                    value={`https://entec-keyboard.web.app/?session=${remoteSessionId}`} 
+                    size={90} 
+                  />
+                </View>
+              </>
+            ) : (
+              <>
+                <Text style={[styles.qrTitle, { color: colors.text }]}>{t('remote_search')}</Text>
+                <View style={styles.qrCodeWrapper}>
+                  <QRCode 
+                    value={`https://entec-keyboard.web.app/?session=${remoteSessionId}`} 
+                    size={140} 
+                  />
+                </View>
+                <Text style={[styles.qrSessionId, { color: colors.gold }]}>{remoteSessionId}</Text>
                 
                 <TVFocusable 
                   onPress={onClose}
                   style={({ focused }: any) => [
                     styles.closeBtn,
-                    { backgroundColor: focused ? colors.gold : 'rgba(255,255,255,0.1)', paddingVertical: 8, paddingHorizontal: 24 }
+                    { backgroundColor: focused ? colors.gold : colors.card, borderWidth: 1, borderColor: colors.border }
                   ]}
                 >
                   {({ focused }: any) => (
                     <Text style={[styles.closeBtnText, { color: focused ? '#000' : colors.text }]}>Close</Text>
                   )}
                 </TVFocusable>
-              </View>
-              <View style={[styles.qrCodeWrapper, { marginBottom: 0, padding: 8 }]}>
-                <QRCode 
-                  value={`https://entec-keyboard.web.app/?session=${remoteSessionId}`} 
-                  size={90} 
-                />
-              </View>
-            </>
-          ) : (
-            <>
-              <Text style={[styles.qrTitle, { color: colors.text }]}>Remote Search</Text>
-              <View style={styles.qrCodeWrapper}>
-                <QRCode 
-                  value={`https://entec-keyboard.web.app/?session=${remoteSessionId}`} 
-                  size={140} 
-                />
-              </View>
-              <Text style={[styles.qrSessionId, { color: colors.gold }]}>{remoteSessionId}</Text>
-              
-              <TVFocusable 
-                onPress={onClose}
-                style={({ focused }: any) => [
-                  styles.closeBtn,
-                  { backgroundColor: focused ? colors.gold : 'rgba(255,255,255,0.1)' }
-                ]}
-              >
-                {({ focused }: any) => (
-                  <Text style={[styles.closeBtnText, { color: focused ? '#000' : colors.text }]}>Close</Text>
-                )}
-              </TVFocusable>
-            </>
-          )}
-        </View>
+              </>
+            )}
+          </View>
+        )}
 
       </View>
+
+      {/* Close button for small screens */}
+      {isSmallScreen && !inline && (
+        <TVFocusable 
+          onPress={onClose}
+          style={({ focused }: any) => [
+            styles.closeBtn,
+            { backgroundColor: focused ? colors.gold : colors.card, borderWidth: 1, borderColor: colors.border, marginTop: 24 }
+          ]}
+        >
+          {({ focused }: any) => (
+            <Text style={[styles.closeBtnText, { color: focused ? '#000' : colors.text }]}>Close</Text>
+          )}
+        </TVFocusable>
+      )}
     </View>
   );
 
@@ -162,7 +185,7 @@ const styles = StyleSheet.create({
   qrContainer: {
     alignItems: 'center',
     padding: 24,
-    borderRadius: 16,
+    borderRadius: 14,
     borderWidth: 1,
   },
   qrTitle: {
@@ -185,7 +208,7 @@ const styles = StyleSheet.create({
   closeBtn: {
     paddingVertical: 12,
     paddingHorizontal: 32,
-    borderRadius: 100,
+    borderRadius: 14,
   },
   closeBtnText: {
     fontWeight: 'bold',

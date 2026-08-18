@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { View, Text, StyleSheet, FlatList, Pressable, ActivityIndicator, useWindowDimensions, Platform, BackHandler, ScrollView, TextInput, Modal } from 'react-native';
+import { View, Text, StyleSheet, FlatList, ActivityIndicator, useWindowDimensions, Platform, BackHandler, ScrollView, TextInput, Modal } from 'react-native';
 import { Image } from 'expo-image';
 import QRCode from 'react-native-qrcode-svg';
 import { TVFocusable } from '@/components/TVFocusable';
 import { SearchKeyboardModal } from '@/components/SearchKeyboardModal';
+import { PinModal } from '@/components/PinModal';
 import { MarqueeText } from '@/components/MarqueeText';
 import { useColors } from '@/hooks/useColors';
+import { useTranslation } from '@/hooks/useTranslation';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useIsFocused } from '@react-navigation/native';
 import { Lineicons } from '@lineiconshq/react-native-lineicons';
@@ -18,11 +20,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Channel } from '@/types';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { WebVideoPlayer } from '@/components/WebVideoPlayer';
+import { EpgNowNext } from '@/components/EpgNowNext';
 
-const SPECIAL_CATEGORIES = [
-  { id: '__favorites__', name: 'Favorites' },
-  { id: '__recent__', name: 'Recently Watched' }
-];
 
 function toChannel(item: any): Channel {
   return {
@@ -41,13 +40,45 @@ function toChannel(item: any): Channel {
 
 export default function LiveScreen() {
   const colors = useColors();
+  const { t } = useTranslation();
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
   const isFocused = useIsFocused();
   const { width, height } = useWindowDimensions();
-  const isLandscape = width > height;
-  const mobileNumColumns = Math.max(2, Math.floor((width - 40) / 160));
-  const isLargeScreen = width >= 1024 || Platform.isTV;
+  const rawIsLandscape = width > height;
+  const rawMobileNumColumns = Math.max(2, Math.floor((width - 40) / 160));
+  const rawIsLargeScreen = width >= 1024 || Platform.isTV;
+
+  const [layoutState, setLayoutState] = useState({
+    isLandscape: rawIsLandscape,
+    isLargeScreen: rawIsLargeScreen,
+    mobileNumColumns: rawMobileNumColumns
+  });
+
+  useEffect(() => {
+    if (isFocused) {
+      setLayoutState({
+        isLandscape: rawIsLandscape,
+        isLargeScreen: rawIsLargeScreen,
+        mobileNumColumns: rawMobileNumColumns
+      });
+    }
+  }, [isFocused, rawIsLandscape, rawIsLargeScreen, rawMobileNumColumns]);
+
+  const { isLandscape, isLargeScreen, mobileNumColumns } = layoutState;
+  const isParentalLocked = useAppStore((s) => s.isParentalLocked);
+  const unlockCategory = useAppStore((s) => s.unlockCategory);
+  const favorites = useAppStore((s) => s.favorites);
+  const isChannelLocked = useAppStore((s) => s.isChannelLocked);
+  const toggleChannelLock = useAppStore((s) => s.toggleChannelLock);
+  const lockedChannels = useAppStore((s) => s.lockedChannels);
+  const unlockChannel = useAppStore((s) => s.unlockChannel);
+  const parentalPin = useAppStore((s) => s.parentalPin);
+
+  const [pinModalVisible, setPinModalVisible] = useState(false);
+  const [pendingCategory, setPendingCategory] = useState<any>(null);
+  const [pendingChannelLock, setPendingChannelLock] = useState<string | null>(null);
+  const [pendingChannelPlay, setPendingChannelPlay] = useState<any>(null);
 
   const activePlaylistId = useAppStore((s) => s.activePlaylistId);
   const activeCategories = useAppStore((s) => s.activeCategories);
@@ -57,7 +88,7 @@ export default function LiveScreen() {
   const continueWatching = useAppStore((s) => s.continueWatching) || [];
   const updateContinueWatching = useAppStore((s) => s.updateContinueWatching);
   const toggleFavorite = useAppStore((s) => s.toggleFavorite);
-
+  const moreOptions = useAppStore((s) => s.moreOptions);
   const [selectedCategory, setSelectedCategory] = useState<{ id: string; name: string } | null>(null);
   const [selectedChannel, setSelectedChannel] = useState<Channel | null>(null);
   const [localChannels, setLocalChannels] = useState<Channel[]>([]);
@@ -73,48 +104,45 @@ export default function LiveScreen() {
   const hasDefaulted = useRef(false);
   const webVideoRef = useRef<any>(null);
   const [showFullscreenHint, setShowFullscreenHint] = useState(false);
-  const [showCategoryKeyboard, setShowCategoryKeyboard] = useState(false);
+  const [channelSearch, setChannelSearch] = useState('');
   const [showChannelKeyboard, setShowChannelKeyboard] = useState(false);
+  const [unlockedForSession, setUnlockedForSession] = useState<string[]>([]);
   const [showSwitchPageModal, setShowSwitchPageModal] = useState(false);
   const flatListRef = useRef<FlatList>(null);
 
-  const [orderedLiveCats, setOrderedLiveCats] = useState<any[]>([]);
+  const categoryPreferences = useAppStore(s => s.categoryPreferences);
+  const defaultPrefs = useMemo(() => ({ hiddenIds: [], liveOrder: [], vodOrder: [], seriesOrder: [] }), []);
+  const prefs = categoryPreferences[activePlaylistId] || defaultPrefs;
 
-  useEffect(() => {
-    if (activeCategories?.live) {
-      AsyncStorage.getItem(`cat_order_${activePlaylistId}_live`).then(orderStr => {
-        if (orderStr) {
-          try {
-            const orderArr = JSON.parse(orderStr);
-            const orderMap = new Map<string, number>(orderArr.map((id: string, index: number) => [id, index]));
-            const sorted = [...activeCategories.live].sort((a: any, b: any) => {
-              const idxA = orderMap.has(a.id) ? (orderMap.get(a.id) as number) : 999999;
-              const idxB = orderMap.has(b.id) ? (orderMap.get(b.id) as number) : 999999;
-              return idxA - idxB;
-            });
-            setOrderedLiveCats(sorted);
-          } catch(e) {
-            setOrderedLiveCats(activeCategories.live);
-          }
-        } else {
-          setOrderedLiveCats(activeCategories.live);
-        }
-      }).catch(() => {
-        setOrderedLiveCats(activeCategories.live);
+  const orderedLiveCats = useMemo(() => {
+    if (!activeCategories?.live) return [];
+    
+    let filtered = activeCategories.live.filter((c: any) => 
+      !prefs.hiddenIds.includes(c.id) && 
+      !c.name.toLowerCase().includes('remote search')
+    );
+    
+    if (prefs.liveOrder && prefs.liveOrder.length > 0) {
+      const orderMap = new Map<string, number>(prefs.liveOrder.map((id, index) => [id, index]));
+      filtered.sort((a: any, b: any) => {
+        const idxA = orderMap.has(a.id) ? orderMap.get(a.id)! : 999999;
+        const idxB = orderMap.has(b.id) ? orderMap.get(b.id)! : 999999;
+        return idxA - idxB;
       });
-    } else {
-      setOrderedLiveCats([]);
     }
-  }, [activeCategories?.live, activePlaylistId]);
+    return filtered;
+  }, [activeCategories?.live, prefs]);
 
   const [categorySearch, setCategorySearch] = useState('');
-  const [channelSearch, setChannelSearch] = useState('');
+  const [showCategoryKeyboard, setShowCategoryKeyboard] = useState(false);
 
   const categories = useMemo(() => [
-    { id: '__search__', name: 'Search Live Channels' },
-    ...SPECIAL_CATEGORIES,
+    { id: '__all__', name: t('all') || 'All' },
+    { id: '__search__', name: t('remote_search') },
+    { id: '__favorites__', name: t('favorites') },
+    { id: '__recent__', name: t('continue_watching') },
     ...orderedLiveCats
-  ], [orderedLiveCats]);
+  ], [orderedLiveCats, t]);
 
   const filteredCategories = useMemo(() => {
     if (!categorySearch.trim()) return categories;
@@ -128,30 +156,7 @@ export default function LiveScreen() {
     return localChannels.filter(ch => ch.name.toLowerCase().includes(q));
   }, [localChannels, channelSearch]);
 
-  const moveCategory = async (direction: 'up' | 'down') => {
-    if (!selectedCategory || selectedCategory.id.startsWith('__')) return;
-    if (categorySearch.trim().length > 0) return;
-
-    const currentIndex = orderedLiveCats.findIndex(c => c.id === selectedCategory.id);
-    if (currentIndex === -1) return;
-    if (direction === 'up' && currentIndex === 0) return;
-    if (direction === 'down' && currentIndex === orderedLiveCats.length - 1) return;
-
-    const swapIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
-    const newCats = [...orderedLiveCats];
-    const temp = newCats[currentIndex];
-    newCats[currentIndex] = newCats[swapIndex];
-    newCats[swapIndex] = temp;
-
-    setOrderedLiveCats(newCats);
-    
-    try {
-      const newOrder = newCats.map(c => c.id);
-      await AsyncStorage.setItem(`cat_order_${activePlaylistId}_live`, JSON.stringify(newOrder));
-    } catch (e) {
-      console.error("Failed to save custom category order:", e);
-    }
-  };
+  // Category reordering is now handled in settings > manage categories
 
   const moveChannel = async (direction: 'up' | 'down') => {
     if (!selectedChannel || !selectedCategory || selectedCategory.id === '__favorites__' || selectedCategory.id === '__recent__') return;
@@ -243,7 +248,22 @@ export default function LiveScreen() {
     setDisplayCount(50);
 
     try {
-      if (cat.id === '__favorites__') {
+      if (cat.id === '__all__') {
+        const liveCats = useAppStore.getState().activeCategories?.live || [];
+        if (liveCats.length > 0) {
+          const randomCats = [...liveCats].sort(() => 0.5 - Math.random()).slice(0, 5);
+          const chunks = await Promise.all(
+            randomCats.map(c => getChannelsForCategory(activePlaylistId, 'live', c.id, c.name).catch(() => []))
+          );
+          const shuffled = chunks.flat().sort(() => 0.5 - Math.random());
+          setLocalChannels(shuffled);
+          if (isLargeScreen && shuffled.length > 0) {
+            setSelectedChannel(shuffled[0]);
+          } else if (shuffled.length === 0) {
+            setSelectedChannel(null);
+          }
+        }
+      } else if (cat.id === '__favorites__') {
         const storeFavs = useAppStore.getState().favoriteItems || [];
         const favs = storeFavs
           .filter((item: any) => item.type === 'live' || item.isLive === true || (item.isLive as unknown) === 'true')
@@ -305,6 +325,17 @@ export default function LiveScreen() {
       loadCategory(selectedCategory);
     }
   }, [selectedCategory, loadCategory]);
+
+  useEffect(() => {
+    if (orderedLiveCats.length > 0 && !hasDefaulted.current) {
+      setSelectedCategory(categories.find(c => c.id === '__recent__') || null);
+      hasDefaulted.current = true;
+    }
+  }, [orderedLiveCats, isLargeScreen, isParentalLocked]);
+
+  useEffect(() => {
+    hasDefaulted.current = false;
+  }, [activePlaylistId]);
 
   useEffect(() => {
     if (selectedCategory?.id === '__favorites__') {
@@ -386,7 +417,9 @@ export default function LiveScreen() {
     setSelectedChannel(null);
   }, [activePlaylistId]);
 
-  const player = useVideoPlayer(isLargeScreen && selectedChannel && isFocused ? selectedChannel.streamUrl : null, (p) => {
+  const isSelectedLocked = selectedChannel ? (isChannelLocked(selectedChannel.id) && !unlockedForSession.includes(selectedChannel.id)) : false;
+
+  const player = useVideoPlayer(isLargeScreen && selectedChannel && isFocused && !isSelectedLocked ? selectedChannel.streamUrl : null, (p) => {
     p.volume = 1;
     p.play();
   });
@@ -403,22 +436,41 @@ export default function LiveScreen() {
   useEffect(() => {
     if (selectedChannel) {
       setIsVideoBuffering(true);
-      const channelItem: any = {
-        id: selectedChannel.id,
-        name: selectedChannel.name,
-        logo: selectedChannel.logo || '',
-        category: selectedChannel.category || 'Live TV',
-        streamUrl: selectedChannel.streamUrl,
-        current: selectedChannel.current || '',
-        next: selectedChannel.next || '',
-        quality: selectedChannel.quality || 'HD',
-        isLive: true,
-        type: 'live',
-        timestamp: Date.now()
-      };
-      updateContinueWatching(channelItem);
     }
   }, [selectedChannel?.id]);
+
+  const playChannelMobile = useCallback((channel: Channel, index: number) => {
+    setPlaybackQueue(filteredChannels, index);
+    updateContinueWatching({
+      id: channel.id,
+      title: channel.name,
+      name: channel.name,
+      poster: channel.logo || '',
+      logo: channel.logo || '',
+      category: channel.category || 'Live TV',
+      streamUrl: channel.streamUrl,
+      current: channel.current || '',
+      next: channel.next || '',
+      quality: channel.quality || 'HD',
+      isLive: true,
+      type: 'live',
+      timestamp: Date.now()
+    } as any);
+    router.push({
+      pathname: '/player',
+      params: {
+        id: channel.id,
+        streamUrl: channel.streamUrl,
+        title: channel.name,
+        isLive: 'true',
+        current: channel.current,
+        next: channel.next,
+        quality: channel.quality,
+        logo: channel.logo || '',
+        category: channel.category || '',
+      },
+    });
+  }, [filteredChannels, setPlaybackQueue, updateContinueWatching]);
 
   const openBigPlayer = useCallback((channel: Channel) => {
     const queueToUse = filteredChannels.length > 0 ? filteredChannels : localChannels;
@@ -427,8 +479,24 @@ export default function LiveScreen() {
       setPlaybackQueue(queueToUse, channelIdx);
     }
     
+    updateContinueWatching({
+      id: channel.id,
+      title: channel.name,
+      name: channel.name,
+      poster: channel.logo || '',
+      logo: channel.logo || '',
+      category: channel.category || 'Live TV',
+      streamUrl: channel.streamUrl,
+      current: channel.current || '',
+      next: channel.next || '',
+      quality: channel.quality || 'HD',
+      isLive: true,
+      type: 'live',
+      timestamp: Date.now()
+    } as any);
+
     setIsFullscreen(true);
-  }, [filteredChannels, localChannels, setPlaybackQueue]);
+  }, [filteredChannels, localChannels, setPlaybackQueue, updateContinueWatching]);
 
 
 
@@ -460,21 +528,21 @@ export default function LiveScreen() {
       <View style={[styles.tvContainer, { backgroundColor: isLargeScreen ? 'transparent' : colors.background, paddingLeft: isFullscreen ? 0 : 24, opacity: isFocused ? 1 : 0, pointerEvents: isFocused ? 'auto' : 'none' }]}>
         <View style={[{ flexDirection: 'row', width: 630 }, glassPaneStyle]}>
           {/* Pane 1: Categories */}
-          <View style={[styles.tvPaneCategories, { borderRightWidth: 1, borderRightColor: 'rgba(255,255,255,0.08)' }]}>
+          <View nativeID="tour-live-categories" {...({ id: 'tour-live-categories' } as any)} style={[styles.tvPaneCategories, { borderRightWidth: 1, borderRightColor: 'rgba(255,255,255,0.08)' }]}>
             <View style={styles.tvHeader}>
-              <Text style={[styles.tvTitle, { color: colors.text }]}>Categories</Text>
+              <Text style={[styles.tvTitle, { color: colors.text }]}>{t('categories')}</Text>
               <View style={[styles.searchBox, { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.1)' }]}>
                 <Ionicons name="search" size={14} color={colors.mutedForeground} />
                 {isLargeScreen ? (
                   <TVFocusable onPress={() => setShowCategoryKeyboard(true)} style={{ flex: 1, paddingVertical: 4 }}>
                     <Text style={[styles.searchInput, { color: categorySearch ? colors.text : colors.mutedForeground, marginTop: 4 }]}>
-                      {categorySearch || "Search categories..."}
+                      {categorySearch || t('search_categories')}
                     </Text>
                   </TVFocusable>
                 ) : (
                   <TextInput
                     style={[styles.searchInput, { color: colors.text }]}
-                    placeholder="Search categories..."
+                    placeholder={t('search_categories')}
                     placeholderTextColor={colors.mutedForeground}
                     value={categorySearch}
                     onChangeText={setCategorySearch}
@@ -508,7 +576,12 @@ export default function LiveScreen() {
                         if (item.id === '__search__') {
                           router.push({ pathname: '/search', params: { tab: 'live' } });
                         } else {
-                          setSelectedCategory(item);
+                          if (isParentalLocked(item.id)) {
+                            setPendingCategory(item);
+                            setPinModalVisible(true);
+                          } else {
+                            setSelectedCategory(item);
+                          }
                         }
                       }}
                       style={({ focused }: any) => [
@@ -538,27 +611,6 @@ export default function LiveScreen() {
                         </View>
                       )}
                     </TVFocusable>
-
-                    {isSelected && !isSpecial && (
-                      <View style={{ flexDirection: 'row', alignItems: 'center', paddingRight: 8, gap: 4 }}>
-                        <TVFocusable
-                          onPress={() => moveCategory('up')}
-                          style={({ focused }: any) => [
-                            { padding: 6, borderRadius: 4, backgroundColor: focused ? colors.gold : 'rgba(255,255,255,0.05)' }
-                          ]}
-                        >
-                          {({ focused }: any) => <Ionicons name="chevron-up" size={14} color={focused ? '#000' : colors.text} />}
-                        </TVFocusable>
-                        <TVFocusable
-                          onPress={() => moveCategory('down')}
-                          style={({ focused }: any) => [
-                            { padding: 6, borderRadius: 4, backgroundColor: focused ? colors.gold : 'rgba(255,255,255,0.05)' }
-                          ]}
-                        >
-                          {({ focused }: any) => <Ionicons name="chevron-down" size={14} color={focused ? '#000' : colors.text} />}
-                        </TVFocusable>
-                      </View>
-                    )}
                   </View>
                 );
               })}
@@ -568,20 +620,20 @@ export default function LiveScreen() {
           {/* Pane 2: Channels */}
           <View style={[styles.tvPaneChannels]}>
             <View style={styles.tvHeader}>
-              <Text style={[styles.tvTitle, { color: colors.text }]}>Channels</Text>
+              <Text style={[styles.tvTitle, { color: colors.text }]}>{t('channels')}</Text>
               <View style={{ flexDirection: 'row', alignItems: 'center', width: '100%' }}>
                 <View style={[styles.searchBox, { flex: 1, backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.1)' }]}>
                   <Ionicons name="search" size={14} color={colors.mutedForeground} />
                   {isLargeScreen ? (
                     <TVFocusable onPress={() => setShowChannelKeyboard(true)} style={{ flex: 1, paddingVertical: 4 }}>
                       <Text style={[styles.searchInput, { color: channelSearch ? colors.text : colors.mutedForeground, marginTop: Platform.OS === 'web' ? 4 : 0 }]}>
-                        {channelSearch || "Search channels..."}
+                        {channelSearch || t('search_channels')}
                       </Text>
                     </TVFocusable>
                   ) : (
                     <TextInput
                       style={[styles.searchInput, { color: colors.text }]}
-                      placeholder="Search channels..."
+                      placeholder={t('search_channels')}
                       placeholderTextColor={colors.mutedForeground}
                       value={channelSearch}
                       onChangeText={setChannelSearch}
@@ -598,7 +650,7 @@ export default function LiveScreen() {
             {filteredChannels.length === 0 && !loading ? (
               <View style={styles.centerAll}>
                 <Lineicons icon={MonitorBulk} size={48} color={colors.mutedForeground} />
-                <Text style={[styles.emptyTitle, { color: colors.text, marginTop: 12 }]}>No channels found</Text>
+                <Text style={[styles.emptyTitle, { color: colors.text, marginTop: 12 }]}>{t('no_channels')}</Text>
               </View>
             ) : (
               <View style={{ flex: 1, opacity: loading ? 0.5 : 1 }}>
@@ -620,14 +672,19 @@ export default function LiveScreen() {
                   data={filteredChannels.slice(0, displayCount)}
                   onEndReached={() => setDisplayCount(prev => prev + 50)}
                   onEndReachedThreshold={0.5}
-                  keyExtractor={(_, index) => index.toString()}
+                  keyExtractor={(item) => item.id}
                   style={{ flex: 1 }}
-                  renderItem={({ item }) => {
+                  renderItem={({ item, index }) => {
                     const isSelected = selectedChannel?.id === item.id;
                     return (
                       <TVFocusable
                         hasTVPreferredFocus={focusId === item.id}
                         onPress={() => {
+                          if (isChannelLocked(item.id) && !unlockedForSession.includes(item.id)) {
+                            setPendingChannelPlay({ ...item, index });
+                            setPinModalVisible(true);
+                            return;
+                          }
                           setSelectedChannel(item);
                           setShowChannelKeyboard(false);
                           setShowCategoryKeyboard(false);
@@ -660,6 +717,9 @@ export default function LiveScreen() {
                               <Text style={[styles.tvChannelText, { color: focused ? '#000' : colors.text, fontWeight: isSelected ? 'bold' : '500' }]} numberOfLines={1}>
                                 {item.num ? `${item.num} - ` : ''}{item.name}
                               </Text>
+                              {item.id.startsWith('xt_live_') && (
+                                <EpgNowNext streamId={item.id.replace('xt_live_', '')} />
+                              )}
                             </View>
                           </View>
                         )}
@@ -680,7 +740,7 @@ export default function LiveScreen() {
               value={categorySearch}
               onChangeText={setCategorySearch}
               onClose={() => setShowCategoryKeyboard(false)}
-              placeholder="Search categories..."
+              placeholder={t('search_categories')}
               inline
             />
           ) : showChannelKeyboard ? (
@@ -689,7 +749,7 @@ export default function LiveScreen() {
               value={channelSearch}
               onChangeText={setChannelSearch}
               onClose={() => setShowChannelKeyboard(false)}
-              placeholder="Search channels..."
+              placeholder={t('search_channels')}
               inline
             />
           ) : selectedChannel ? (
@@ -697,23 +757,34 @@ export default function LiveScreen() {
               <TVFocusable
                 style={[styles.tvPlayerWrapper, isFullscreen && { aspectRatio: undefined, borderRadius: 0, ...StyleSheet.absoluteFillObject }]}
                 onPress={() => {
-                  if (!isFullscreen) openBigPlayer(selectedChannel);
+                  if (isSelectedLocked) {
+                    setPendingChannelPlay({ ...selectedChannel, index: 0 });
+                    setPinModalVisible(true);
+                  } else if (!isFullscreen) openBigPlayer(selectedChannel);
                 }}
               >
-                {Platform.OS === 'web' ? (
-                  <WebVideoPlayer
-                    ref={webVideoRef}
-                    source={`/proxy?url=${encodeURIComponent(selectedChannel.streamUrl)}`}
-                    style={StyleSheet.absoluteFill}
-                    paused={isPaused}
-                    muted={isMuted}
-                    controls={false}
-                    aspectMode={aspectMode}
-                    onFullscreenExit={() => setIsFullscreen(false)}
-                    onReady={() => setIsVideoBuffering(false)}
-                  />
+                {isSelectedLocked ? (
+                  <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.8)', justifyContent: 'center', alignItems: 'center' }]}>
+                    <Ionicons name="lock-closed" size={64} color={colors.gold} />
+                    <Text style={{ color: colors.text, marginTop: 16, fontSize: 18, fontWeight: 'bold' }}>Channel Locked</Text>
+                    <Text style={{ color: colors.mutedForeground, marginTop: 8 }}>Press to unlock</Text>
+                  </View>
+                ) : Platform.OS === 'web' ? (
+                  isFocused ? (
+                    <WebVideoPlayer
+                      ref={webVideoRef}
+                      source={`/proxy?url=${encodeURIComponent(selectedChannel.streamUrl)}`}
+                      style={StyleSheet.absoluteFill}
+                      paused={isPaused}
+                      muted={isMuted}
+                      controls={false}
+                      aspectMode={aspectMode}
+                      onFullscreenExit={() => setIsFullscreen(false)}
+                      onReady={() => setIsVideoBuffering(false)}
+                    />
+                  ) : null
                 ) : (
-                  <VideoView player={player} style={StyleSheet.absoluteFill} contentFit="contain" />
+                  isFocused ? <VideoView player={player} style={StyleSheet.absoluteFill} contentFit="contain" /> : null
                 )}
                 {isVideoBuffering && (
                   <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' }]} pointerEvents="none">
@@ -841,6 +912,28 @@ export default function LiveScreen() {
                       )}
                     </TVFocusable>
                     <TVFocusable
+                      onPress={() => {
+                        console.log('LOCK BUTTON PRESSED in live.tsx. Selected channel:', selectedChannel?.id, 'parentalPin:', parentalPin);
+                        if (!selectedChannel) return;
+                        if (parentalPin) {
+                          console.log('parentalPin exists, showing PinModal');
+                          setPendingChannelLock(selectedChannel.id);
+                          setPinModalVisible(true);
+                        } else {
+                          console.log('parentalPin does not exist, directly locking channel');
+                          toggleChannelLock(selectedChannel.id);
+                        }
+                      }}
+                      style={({ focused }: any) => [
+                        styles.tvFavoriteBtn,
+                        { backgroundColor: focused ? colors.gold : 'rgba(255,255,255,0.05)', borderColor: isChannelLocked(selectedChannel.id) ? colors.gold : colors.border, marginTop: 0, paddingHorizontal: 16 }
+                      ]}
+                    >
+                      {({ focused }: any) => (
+                        <Ionicons name="lock-closed" size={22} color={focused ? '#000' : (isChannelLocked(selectedChannel.id) ? colors.gold : colors.text)} />
+                      )}
+                    </TVFocusable>
+                    <TVFocusable
                       onPress={() => setShowSwitchPageModal(true)}
                       style={({ focused }: any) => [
                         styles.tvFavoriteBtn,
@@ -949,6 +1042,32 @@ export default function LiveScreen() {
             </View>
           </View>
         </Modal>
+        <PinModal 
+          visible={pinModalVisible} 
+          expectedPin={parentalPin}
+          onCancel={() => {
+            setPinModalVisible(false);
+            setPendingCategory(null);
+            setPendingChannelPlay(null);
+            setPendingChannelLock(null);
+          }}
+          onSuccess={() => {
+            setPinModalVisible(false);
+            if (pendingCategory) {
+              setSelectedCategory(pendingCategory);
+              setPendingCategory(null);
+            } else if (pendingChannelPlay) {
+              setUnlockedForSession(prev => [...prev, pendingChannelPlay.id]);
+              setSelectedChannel(pendingChannelPlay);
+              setShowChannelKeyboard(false);
+              setShowCategoryKeyboard(false);
+              setPendingChannelPlay(null);
+            } else if (pendingChannelLock) {
+              toggleChannelLock(pendingChannelLock);
+              setPendingChannelLock(null);
+            }
+          }}
+        />
       </View>
     );
   }
@@ -983,7 +1102,7 @@ export default function LiveScreen() {
             <Ionicons name="search" size={16} color={colors.mutedForeground} />
             <TVFocusable onPress={() => setShowChannelKeyboard(true)} style={{ flex: 1, paddingVertical: 4 }}>
               <Text style={[styles.searchInput, { color: channelSearch ? colors.text : colors.mutedForeground, marginTop: 4 }]}>
-                {channelSearch || "Search channels..."}
+                {channelSearch || t('search_channels')}
               </Text>
             </TVFocusable>
             {channelSearch ? (
@@ -998,7 +1117,7 @@ export default function LiveScreen() {
           value={channelSearch}
           onChangeText={setChannelSearch}
           onClose={() => setShowChannelKeyboard(false)}
-          placeholder="Search channels..."
+          placeholder={t('search_channels')}
           inline={false}
         />
 
@@ -1035,21 +1154,12 @@ export default function LiveScreen() {
             renderItem={({ item, index }) => (
               <TVFocusable
                 onPress={() => {
-                  setPlaybackQueue(filteredChannels, index);
-                  router.push({
-                    pathname: '/player',
-                    params: {
-                      id: item.id,
-                      streamUrl: item.streamUrl,
-                      title: item.name,
-                      isLive: 'true',
-                      current: item.current,
-                      next: item.next,
-                      quality: item.quality,
-                      logo: item.logo || '',
-                      category: item.category || '',
-                    },
-                  });
+                  if (isChannelLocked(item.id)) {
+                    setPendingChannelPlay({ ...item, index });
+                    setPinModalVisible(true);
+                    return;
+                  }
+                  playChannelMobile(item, index);
                 }}
                 style={({ focused }: any) => [
                   styles.mobileChannelListContent,
@@ -1100,6 +1210,25 @@ export default function LiveScreen() {
             <Text style={[styles.floatingViewAllText, { color: colors.text }]}>View All Categories</Text>
           </TVFocusable>
         )}
+        <PinModal 
+          visible={pinModalVisible} 
+          expectedPin={parentalPin}
+          onCancel={() => {
+            setPinModalVisible(false);
+            setPendingChannelPlay(null);
+            setPendingChannelLock(null);
+          }}
+          onSuccess={() => {
+            setPinModalVisible(false);
+            if (pendingChannelPlay) {
+              playChannelMobile(pendingChannelPlay, pendingChannelPlay.index || 0);
+              setPendingChannelPlay(null);
+            } else if (pendingChannelLock) {
+              toggleChannelLock(pendingChannelLock);
+              setPendingChannelLock(null);
+            }
+          }}
+        />
       </View>
     );
   }
@@ -1118,7 +1247,7 @@ export default function LiveScreen() {
           <Ionicons name="search" size={16} color={colors.mutedForeground} />
           <TVFocusable onPress={() => setShowCategoryKeyboard(true)} style={{ flex: 1, paddingVertical: 4 }}>
             <Text style={[styles.searchInput, { color: categorySearch ? colors.text : colors.mutedForeground, marginTop: 4 }]}>
-              {categorySearch || "Search categories..."}
+              {categorySearch || t('search_categories')}
             </Text>
           </TVFocusable>
           {categorySearch ? (
@@ -1133,7 +1262,7 @@ export default function LiveScreen() {
         value={categorySearch}
         onChangeText={setCategorySearch}
         onClose={() => setShowCategoryKeyboard(false)}
-        placeholder="Search categories..."
+        placeholder={t('search_categories')}
         inline={false}
       />
 
@@ -1180,6 +1309,25 @@ export default function LiveScreen() {
           contentContainerStyle={[styles.listContent, { paddingBottom: insets.bottom + 80 }]}
         />
       )}
+      <PinModal 
+        visible={pinModalVisible} 
+        expectedPin={parentalPin}
+        onCancel={() => {
+          setPinModalVisible(false);
+          setPendingChannelPlay(null);
+          setPendingChannelLock(null);
+        }}
+        onSuccess={() => {
+          setPinModalVisible(false);
+          if (pendingChannelPlay) {
+            playChannelMobile(pendingChannelPlay, pendingChannelPlay.index || 0);
+            setPendingChannelPlay(null);
+          } else if (pendingChannelLock) {
+            toggleChannelLock(pendingChannelLock);
+            setPendingChannelLock(null);
+          }
+        }}
+      />
     </View>
   );
 }

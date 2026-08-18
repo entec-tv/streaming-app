@@ -1,10 +1,10 @@
+import { Ionicons } from "@expo/vector-icons";
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   View, 
   Text, 
   StyleSheet, 
   FlatList, 
-  Pressable, 
   TextInput, 
   ActivityIndicator, 
   Dimensions,
@@ -13,10 +13,11 @@ import {
 } from 'react-native';
 import { useColors } from '@/hooks/useColors';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Lineicons } from '@lineiconshq/react-native-lineicons';
-import { ArrowLeftBulk, Search1Bulk, XmarkBulk, RefreshCircle1ClockwiseBulk, Database2Bulk, EmojiSadBulk, Ban2Bulk, MonitorBulk, QuestionMarkCircleBulk, Microphone1Bulk, PlayBulk } from '@lineiconshq/free-icons';
+
+
 import { Image } from 'expo-image';
 import { router, useLocalSearchParams } from 'expo-router';
+import { useIsFocused } from '@react-navigation/native';
 import { TVFocusable } from '@/components/TVFocusable';
 import { TVSidebar } from '@/components/TVSidebar';
 import { TVKeyboard } from '@/components/TVKeyboard';
@@ -25,6 +26,8 @@ import { Channel } from '@/types';
 import QRCode from 'react-native-qrcode-svg';
 import { listenToRemoteKeyboard } from '@/store/firebase';
 import { useVoiceSearch } from '@/hooks/useVoiceSearch';
+import { useTranslation } from '@/hooks/useTranslation';
+import { base64Encode } from '@/lib/base64';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -32,6 +35,7 @@ type SearchTab = 'all' | 'live' | 'vod' | 'series';
 
 export default function SearchScreen() {
   const colors = useColors();
+  const { t } = useTranslation();
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
   const isLargeScreen = width >= 1024 || Platform.isTV;
@@ -58,6 +62,7 @@ export default function SearchScreen() {
   const remoteSessionId = useRef(Math.random().toString(36).substring(2, 6).toUpperCase()).current;
   const inputRef = useRef<any>(null);
   const { tab } = useLocalSearchParams<{ tab?: SearchTab }>();
+  const isFocused = useIsFocused();
 
   const { isListening, toggleListening, isSupported } = useVoiceSearch((text) => {
     setQuery((prev) => prev ? `${prev} ${text}` : text);
@@ -77,13 +82,13 @@ export default function SearchScreen() {
     return () => clearTimeout(t);
   }, []);
 
-  // Auto-build search index if empty
+  // Auto-build search index if empty and tab is focused
   useEffect(() => {
-    if (activePlaylistId && !searchIndexReady && !loadingSearchIndex && !hasAttemptedAutoBuild) {
+    if (isFocused && activePlaylistId && !searchIndexReady && !loadingSearchIndex && !hasAttemptedAutoBuild) {
       setHasAttemptedAutoBuild(true);
-      handleBuildIndex();
+      loadSearchIndex(activePlaylistId);
     }
-  }, [activePlaylistId, searchIndexReady, loadingSearchIndex, hasAttemptedAutoBuild]);
+  }, [isFocused, activePlaylistId, searchIndexReady, loadingSearchIndex, hasAttemptedAutoBuild]);
 
   const handleBuildIndex = async () => {
     if (activePlaylistId) {
@@ -124,8 +129,30 @@ export default function SearchScreen() {
   }, [query, activeTab, searchChannels, getSearchSuggestions]);
 
   const handleItemPress = (item: Channel, index: number) => {
+    const encodedUrl = base64Encode(item.streamUrl || '');
     if (item.type === 'live') {
-      router.replace({ pathname: '/(tabs)/live', params: { categoryId: item.categoryId, focusId: item.id } });
+      // Use the unified Live TV tab for Web and TV so the player UI is identical
+      if (Platform.OS === 'web' || Platform.isTV) {
+        router.push({
+          pathname: '/(tabs)/live',
+          params: { categoryId: item.categoryId || '', focusId: item.id }
+        });
+      } else {
+        router.push({
+          pathname: '/player',
+          params: {
+            id: item.id,
+            streamUrl: encodedUrl,
+            title: item.name || item.title,
+            isLive: 'true',
+            current: item.current || '',
+            next: item.next || '',
+            quality: item.quality || 'HD',
+            logo: item.logo || item.poster || '',
+            category: item.category || ''
+          }
+        });
+      }
     } else if (item.type === 'vod') {
       router.push({ 
         pathname: '/movie-detail', 
@@ -133,7 +160,7 @@ export default function SearchScreen() {
           id: item.id,
           title: item.name,
           poster: item.logo || '',
-          streamUrl: item.streamUrl || ''
+          streamUrl: encodedUrl
         } 
       });
     } else if (item.type === 'series') {
@@ -143,7 +170,7 @@ export default function SearchScreen() {
           id: item.id,
           title: item.name,
           poster: item.logo || '',
-          streamUrl: item.streamUrl || ''
+          streamUrl: encodedUrl
         } 
       });
     }
@@ -170,7 +197,7 @@ export default function SearchScreen() {
       >
         <View style={styles.cardImageWrapper}>
           <Image 
-            source={{ uri: item.logo || `https://ui-avatars.com/api/?name=${encodeURIComponent(item.name)}&background=1A1A1A&color=D4A843&bold=true&size=120&format=png` }} 
+            source={{ uri: item.logo || `https://ui-avatars.com/api/?name=${encodeURIComponent(item.name)}&background=1A1A1A&color=${colors.gold.replace('#', '')}&bold=true&size=120&format=png` }} 
             style={styles.cardImage}
             contentFit={item.type === 'live' ? 'contain' : 'cover'}
           />
@@ -198,7 +225,7 @@ export default function SearchScreen() {
           {preparingChannelId === item.id ? (
             <ActivityIndicator size="small" color={colors.gold} />
           ) : (
-            <Lineicons icon={item.type === 'live' ? MonitorBulk : PlayBulk} size={18} color={colors.gold} />
+            <Ionicons name={item.type === 'live' ? "tv-outline" : "play"} size={18} color={colors.gold} />
           )}
         </View>
       </TVFocusable>
@@ -206,7 +233,7 @@ export default function SearchScreen() {
   };
 
   return (
-    <View style={{ flex: 1, flexDirection: 'row', backgroundColor: colors.background }}>
+    <View style={{ flex: 1, flexDirection: 'row', backgroundColor: 'transparent' }}>
       <TVSidebar />
       <View style={[styles.container, { flex: 1, overflow: 'hidden', paddingTop: insets.top, paddingLeft: isLargeScreen ? 110 : 0 }]}>
       {/* Search Header */}
@@ -220,7 +247,7 @@ export default function SearchScreen() {
           focusable={true}
         >
           {({ focused }: any) => (
-            <Lineicons icon={ArrowLeftBulk} size={22} color={focused ? colors.gold : colors.text} />
+            <Ionicons name="chevron-back" size={22} color={focused ? colors.gold : colors.text} />
           )}
         </TVFocusable>
         <TVFocusable 
@@ -231,25 +258,25 @@ export default function SearchScreen() {
               inputRef.current?.focus();
             }
           }}
-          style={({ focused }: any) => [styles.searchBox, { backgroundColor: colors.surface, borderColor: focused ? '#D4A843' : colors.border }]}
+          style={({ focused }: any) => [styles.searchBox, { backgroundColor: colors.surface, borderColor: focused ? colors.gold : colors.border }]}
         >
-          <Lineicons icon={Search1Bulk} size={18} color={colors.mutedForeground} style={{ marginRight: 8 }} />
+          <Ionicons name="search" size={18} color={colors.mutedForeground} style={{ marginRight: 8 }} />
           <TextInput
             ref={inputRef}
             value={query}
             onChangeText={setQuery}
-            placeholder="Search channels, movies, series..."
+            placeholder={t('search_all')}
             placeholderTextColor={colors.mutedForeground}
             style={[styles.searchInput, { color: colors.text }]}
             returnKeyType="search"
             focusable={true}
             editable={true}
-            showSoftInputOnFocus={false}
+            showSoftInputOnFocus={!isLargeScreen}
             onFocus={() => { if (isLargeScreen) setIsKeyboardOpen(true) }}
           />
           {query.length > 0 && (
             <TVFocusable disableBorder onPress={() => setQuery('')}>
-              <Lineicons icon={XmarkBulk} size={18} color={colors.text} />
+              <Ionicons name="close" size={18} color={colors.text} />
             </TVFocusable>
           )}
         </TVFocusable>
@@ -264,7 +291,7 @@ export default function SearchScreen() {
             focusable={true}
           >
             {({ focused }: any) => (
-              <Lineicons icon={Microphone1Bulk} size={20} color={isListening ? "#FFF" : (focused ? "#FFF" : colors.gold)} />
+              <Ionicons name="mic-outline" size={20} color={isListening ? "#FFF" : (focused ? "#FFF" : colors.gold)} />
             )}
           </TVFocusable>
         )}
@@ -278,7 +305,7 @@ export default function SearchScreen() {
             focusable={true}
           >
             {({ focused }: any) => (
-              <Lineicons icon={RefreshCircle1ClockwiseBulk} size={20} color={focused ? "#FFF" : colors.gold} />
+              <Ionicons name="refresh-outline" size={20} color={focused ? "#FFF" : colors.gold} />
             )}
           </TVFocusable>
         )}
@@ -335,7 +362,7 @@ export default function SearchScreen() {
               </View>
 
               <View style={{ alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.02)', padding: 24, borderRadius: 16, borderWidth: 1, borderColor: colors.border }}>
-                <Text style={{ color: colors.text, fontSize: 18, fontWeight: 'bold', marginBottom: 12 }}>Remote Search</Text>
+                <Text style={{ color: colors.text, fontSize: 18, fontWeight: 'bold', marginBottom: 12 }}>{t('remote_search')}</Text>
                 <View style={{ backgroundColor: '#fff', padding: 12, borderRadius: 12, marginBottom: 12 }}>
                   <QRCode 
                     value={`https://entec-keyboard.web.app/?session=${remoteSessionId}`} 
@@ -359,7 +386,7 @@ export default function SearchScreen() {
         </View>
       ) : !searchIndexReady ? (
         <View style={styles.centerContainer}>
-          <Lineicons icon={Database2Bulk} size={64} color={colors.mutedForeground} style={{ marginBottom: 16 }} />
+          <Ionicons name="server-outline" size={64} color={colors.mutedForeground} style={{ marginBottom: 16 }} />
           <Text style={[styles.emptyTitle, { color: colors.text }]}>
             No Search Data
           </Text>
@@ -369,7 +396,7 @@ export default function SearchScreen() {
         </View>
       ) : query.trim().length >= 2 && filteredResults.length === 0 ? (
         <View style={styles.centerContainer}>
-          <Lineicons icon={EmojiSadBulk} size={64} color={colors.mutedForeground} style={{ marginBottom: 16 }} />
+          <Ionicons name="sad-outline" size={64} color={colors.mutedForeground} style={{ marginBottom: 16 }} />
           <Text style={[styles.emptyTitle, { color: colors.text }]}>
             No Results Found
           </Text>
@@ -379,7 +406,7 @@ export default function SearchScreen() {
         </View>
       ) : query.trim().length < 2 ? (
         <View style={styles.centerContainer}>
-          <Lineicons icon={Search1Bulk} size={64} color={colors.mutedForeground} style={{ marginBottom: 16 }} />
+          <Ionicons name="search" size={64} color={colors.mutedForeground} style={{ marginBottom: 16 }} />
           <Text style={[styles.emptyTitle, { color: colors.text }]}>
             Search Everything
           </Text>
@@ -395,7 +422,7 @@ export default function SearchScreen() {
           contentContainerStyle={[styles.listContent, { paddingBottom: insets.bottom + 20 }]}
           ListEmptyComponent={
             <View style={styles.centerContainer}>
-              <Lineicons icon={Ban2Bulk} size={48} color={colors.mutedForeground} style={{ marginBottom: 12 }} />
+              <Ionicons name="ban" size={48} color={colors.mutedForeground} style={{ marginBottom: 12 }} />
               <Text style={[styles.emptyTitle, { color: colors.text }]}>
                 No results found
               </Text>
@@ -554,9 +581,12 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: 'bold',
   },
-  cardCategory: {
+  cardPackage: {
     fontSize: 12,
     flex: 1,
+  },
+  cardCategory: {
+    fontSize: 12,
   },
   playIconWrapper: {
     width: 36,

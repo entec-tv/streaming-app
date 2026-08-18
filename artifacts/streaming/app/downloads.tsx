@@ -1,19 +1,20 @@
+import { Ionicons } from "@expo/vector-icons";
 import React from 'react';
-import { View, Text, StyleSheet, FlatList, Pressable, Alert } from 'react-native';
+import { View, Text, StyleSheet, FlatList, Alert } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
 import { useAppStore } from '@/store/app-store';
 import { useColors } from '@/hooks/useColors';
 import { TVFocusable } from '@/components/TVFocusable';
-import { Lineicons } from '@lineiconshq/react-native-lineicons';
-import { ArrowLeftBulk, CloudDownloadBulk, PauseBulk, RefreshCircle1ClockwiseBulk, PlayBulk, Trash3Bulk, XmarkBulk } from '@lineiconshq/free-icons';
 import { Image } from 'expo-image';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useTranslation } from '@/hooks/useTranslation';
 
 export default function DownloadsScreen() {
   const colors = useColors();
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { t } = useTranslation();
   
   const downloads = useAppStore(s => s.downloads);
   const pauseDownload = useAppStore(s => s.pauseDownload);
@@ -55,7 +56,7 @@ export default function DownloadsScreen() {
 
   if (downloads.length === 0) {
     return (
-      <View style={[styles.container, { backgroundColor: colors.background, paddingTop: insets.top }]}>
+      <View style={[styles.container, { backgroundColor: 'transparent', paddingTop: insets.top }]}>
         <Stack.Screen options={{ headerShown: false }} />
         
         <View style={styles.header}>
@@ -68,16 +69,16 @@ export default function DownloadsScreen() {
             focusable={true}
           >
             {({ focused }: any) => (
-              <Lineicons icon={ArrowLeftBulk} size={24} color={focused ? colors.gold : colors.text} />
+              <Ionicons name="chevron-back" size={24} color={focused ? colors.gold : colors.text} />
             )}
           </TVFocusable>
-          <Text style={[styles.headerTitle, { color: colors.text }]}>My Downloads</Text>
+          <Text style={[styles.headerTitle, { color: colors.text }]}>{t('my_downloads')}</Text>
           <View style={{ width: 44 }} />
         </View>
 
         <View style={styles.emptyState}>
-          <Lineicons icon={CloudDownloadBulk} size={64} color={colors.mutedForeground} />
-          <Text style={[styles.emptyText, { color: colors.text }]}>No downloaded content yet</Text>
+          <Ionicons name="download-outline" size={64} color={colors.mutedForeground} />
+          <Text style={[styles.emptyText, { color: colors.text }]}>{t('no_downloads')}</Text>
           <Text style={[styles.emptySubText, { color: colors.mutedForeground }]}>
             Movies and episodes you download will appear here for offline viewing.
           </Text>
@@ -87,7 +88,7 @@ export default function DownloadsScreen() {
   }
 
   return (
-    <View style={[styles.container, { backgroundColor: colors.background, paddingTop: insets.top }]}>
+    <View style={[styles.container, { backgroundColor: 'transparent', paddingTop: insets.top }]}>
       <Stack.Screen options={{ headerShown: false }} />
       
       <View style={styles.header}>
@@ -100,18 +101,19 @@ export default function DownloadsScreen() {
           focusable={true}
         >
           {({ focused }: any) => (
-            <Lineicons icon={ArrowLeftBulk} size={24} color={focused ? colors.gold : colors.text} />
+            <Ionicons name="chevron-back" size={24} color={focused ? colors.gold : colors.text} />
           )}
         </TVFocusable>
-        <Text style={[styles.headerTitle, { color: colors.text }]}>My Downloads</Text>
+        <Text style={[styles.headerTitle, { color: colors.text }]}>{t('my_downloads')}</Text>
         <View style={{ width: 44 }} />
       </View>
 
-      <FlatList
-        data={downloads}
-        keyExtractor={(item) => item.id}
-        contentContainerStyle={styles.listContent}
-        renderItem={({ item }) => (
+      <View nativeID="downloads-list" style={{ flex: 1 }}>
+        <FlatList
+          data={downloads}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={styles.listContent}
+          renderItem={({ item }) => (
           <View style={[styles.downloadCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
             <TVFocusable 
               style={({ focused }: any) => [
@@ -129,11 +131,11 @@ export default function DownloadsScreen() {
                   <>
                     <View style={styles.badgeRow}>
                       {item.type === 'series' && (
-                        <Text style={[styles.badge, { backgroundColor: 'rgba(255,255,255,0.1)', color: colors.mutedForeground }]}>Episode</Text>
+                        <Text style={[styles.badge, { backgroundColor: 'rgba(255,255,255,0.1)', color: colors.mutedForeground }]}>{t('episode')}</Text>
                       )}
                       <Text style={[styles.badge, { backgroundColor: colors.gold, color: '#000' }]}>{item.quality}</Text>
                     </View>
-                    <Text style={[styles.status, { color: colors.primary }]}>Downloaded</Text>
+                    <Text style={[styles.status, { color: colors.primary }]}>{t('downloaded')}</Text>
                   </>
                 )}
 
@@ -149,7 +151,7 @@ export default function DownloadsScreen() {
                 )}
 
                 {item.status === 'error' && (
-                  <Text style={[styles.status, { color: colors.destructive }]}>Download Failed</Text>
+                  <Text style={[styles.status, { color: colors.destructive }]}>{t('download_failed')}</Text>
                 )}
               </View>
             </TVFocusable>
@@ -160,7 +162,7 @@ export default function DownloadsScreen() {
                   style={({ focused }: any) => [styles.actionBtn, focused && { borderWidth: 3, borderColor: '#FFF', transform: [{ scale: 1.1 }] }]} 
                   onPress={() => pauseDownload(item.id)} hitSlop={10} focusable={true}
                 >
-                  <Lineicons icon={PauseBulk} size={20} color={colors.text} />
+                  <Ionicons name="pause" size={20} color={colors.text} />
                 </TVFocusable>
               )}
               {(item.status === 'paused' || item.status === 'error') && (
@@ -168,19 +170,20 @@ export default function DownloadsScreen() {
                   style={({ focused }: any) => [styles.actionBtn, focused && { borderWidth: 3, borderColor: '#FFF', transform: [{ scale: 1.1 }] }]} 
                   onPress={() => resumeDownload(item.id)} hitSlop={10} focusable={true}
                 >
-                  <Lineicons icon={item.status === 'error'  ? RefreshCircle1ClockwiseBulk : PlayBulk} size={20} color={item.status === 'error' ? colors.gold : colors.primary} />
+                  <Ionicons name={item.status === 'error'  ? "refresh-outline" : "play"} size={20} color={item.status === 'error' ? colors.gold : colors.primary} />
                 </TVFocusable>
               )}
               <TVFocusable 
                 style={({ focused }: any) => [styles.deleteBtn, focused && { borderWidth: 3, borderColor: '#FFF', transform: [{ scale: 1.1 }] }]} 
                 onPress={() => handleDelete(item)} hitSlop={10} focusable={true}
               >
-                <Lineicons icon={item.status === 'completed'  ? Trash3Bulk : XmarkBulk} size={20} color={colors.destructive} />
+                <Ionicons name={item.status === 'completed'  ? "trash-outline" : "close"} size={20} color={colors.destructive} />
               </TVFocusable>
             </View>
           </View>
         )}
       />
+      </View>
     </View>
   );
 }

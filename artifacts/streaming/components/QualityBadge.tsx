@@ -2,12 +2,13 @@ import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 
 const QUALITY_COLORS: Record<string, { bg: string; text: string; border: string }> = {
-  '4K': { bg: 'rgba(244,197,66,0.18)', text: '#F4C542', border: 'rgba(244,197,66,0.45)' },
-  'FHD': { bg: 'rgba(96,180,255,0.15)', text: '#60B4FF', border: 'rgba(96,180,255,0.35)' },
-  'HD': { bg: 'rgba(255,255,255,0.08)', text: 'rgba(255,255,255,0.6)', border: 'rgba(255,255,255,0.15)' },
+  '4K': { bg: '#F4C542', text: '#000', border: '#F4C542' },
+  'FHD': { bg: '#60B4FF', text: '#000', border: '#60B4FF' },
+  'HD': { bg: 'rgba(255,255,255,0.9)', text: '#000', border: 'rgba(255,255,255,0.9)' },
+  'SD': { bg: 'rgba(0,0,0,0.6)', text: 'rgba(255,255,255,0.8)', border: 'rgba(255,255,255,0.2)' },
 };
 
-export function QualityBadge({ quality }: { quality: '4K' | 'FHD' | 'HD' }) {
+export function QualityBadge({ quality }: { quality: '4K' | 'FHD' | 'HD' | 'SD' }) {
   const c = QUALITY_COLORS[quality] ?? QUALITY_COLORS['HD'];
 
   return (

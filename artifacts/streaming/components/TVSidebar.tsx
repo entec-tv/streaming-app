@@ -9,33 +9,26 @@ import {
 } from 'react-native';
 import { useRouter, usePathname } from 'expo-router';
 import { useColors } from '@/hooks/useColors';
+import { useTranslation } from '@/hooks/useTranslation';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { SymbolView } from 'expo-symbols';
 import { TVFocusable } from '@/components/TVFocusable';
-import { Lineicons } from '@lineiconshq/react-native-lineicons';
-import {
-  Home2Bulk,
-  CloudBolt1Bulk,
-  CameraMovie1Bulk,
-  MonitorBulk,
-  StopwatchBulk,
-  Search1Bulk,
-  User4Bulk,
-} from '@lineiconshq/free-icons';
+// Lineicons removed in favor of Ionicons
 
-const TABS = [
-  { name: 'index', path: '/', icon: 'home-outline', bulkIcon: Home2Bulk, label: 'Home', iosIcon: 'house' },
-  { name: 'live', path: '/live', icon: 'tv-outline', bulkIcon: CloudBolt1Bulk, label: 'Live', iosIcon: 'antenna.radiowaves.left.and.right' },
-  { name: 'movies', path: '/movies', icon: 'film-outline', bulkIcon: CameraMovie1Bulk, label: 'Movies', iosIcon: 'film' },
-  { name: 'series', path: '/series', icon: 'albums-outline', bulkIcon: MonitorBulk, label: 'Series', iosIcon: 'ticket' },
-  { name: 'catchup', path: '/catchup', icon: 'time-outline', bulkIcon: StopwatchBulk, label: 'Replay', iosIcon: 'clock.arrow.circlepath' },
+const MAIN_TABS = [
+  { name: 'home', path: '/', icon: 'home-outline', label: 'Home', iosIcon: 'house' },
+  { name: 'live', path: '/live', icon: 'tv-outline', label: 'Live TV', iosIcon: 'tv' },
+  { name: 'movies', path: '/movies', icon: 'film-outline', label: 'Movies', iosIcon: 'film' },
+  { name: 'series', path: '/series', icon: 'layers-outline', label: 'Series', iosIcon: 'ticket' },
+  { name: 'catchup', path: '/catchup', icon: 'time-outline', label: 'Replay', iosIcon: 'clock.arrow.circlepath' },
 ];
 
 const GOLD = '#F4C542';
 
-function SidebarItem({ icon, bulkIcon, iosIcon, isActive, onPress, isIOS, customContent, onFocus }: any) {
+function SidebarItem({ icon, bulkIcon, iosIcon, isActive, onPress, isIOS, customContent, onFocus, nativeID }: any) {
+  const { isRTL } = useTranslation();
   return (
-    <TVFocusable onPress={onPress} onFocus={onFocus} style={[styles.tabBtn]} disableBorder={true}>
+    <TVFocusable nativeID={nativeID} {...(nativeID ? { id: nativeID } : {})} onPress={onPress} onFocus={onFocus} style={[styles.tabBtn]} disableBorder={true}>
       {({ focused }: any) => (
         <View style={StyleSheet.absoluteFill}>
           <View style={[
@@ -45,7 +38,7 @@ function SidebarItem({ icon, bulkIcon, iosIcon, isActive, onPress, isIOS, custom
             focused && !isActive && styles.itemFocused,
             focused && isActive && styles.itemFocusedActive,
           ]} />
-          <View style={styles.iconContainer}>
+          <View style={[styles.iconContainer, isRTL && { transform: [{ scaleX: -1 }] }]}>
             {customContent ? customContent : (
               isIOS ? (
                 <SymbolView
@@ -54,8 +47,8 @@ function SidebarItem({ icon, bulkIcon, iosIcon, isActive, onPress, isIOS, custom
                   size={22}
                 />
               ) : (
-                <Lineicons
-                  icon={bulkIcon}
+                <Ionicons
+                  name={icon as any}
                   size={22}
                   color={isActive ? GOLD : focused ? GOLD : 'rgba(255,255,255,0.55)'}
                 />
@@ -75,6 +68,7 @@ export function TVSidebar() {
   const router = useRouter();
   const pathname = usePathname();
   const colors = useColors();
+  const { isRTL } = useTranslation();
   const insets = useSafeAreaInsets();
   const isIOS = Platform.OS === 'ios';
   const { width } = useWindowDimensions();
@@ -84,7 +78,7 @@ export function TVSidebar() {
   if (!isLargeScreen) return null;
 
   const renderLogo = () => (
-    <View style={styles.logoContainer}>
+    <View style={[styles.logoContainer, isRTL && { transform: [{ scaleX: -1 }] }]}>
       <Text style={styles.logoEN}>EN</Text>
       <View style={styles.logoDivider} />
       <Text style={styles.logoTEC}>TEC</Text>
@@ -101,17 +95,22 @@ export function TVSidebar() {
       }
     : {
         backgroundColor: 'rgba(14,16,21,0.95)',
-        borderRightWidth: 1,
+        borderRightWidth: isRTL ? 0 : 1,
+        borderLeftWidth: isRTL ? 1 : 0,
         borderRightColor: colors.border,
+        borderLeftColor: colors.border,
       };
 
   return (
     <View
+      nativeID="tour-sidebar-nav"
+      {...({ id: 'tour-sidebar-nav' } as any)}
       style={[
         styles.sidebar,
         {
           paddingTop: insets.top > 0 ? insets.top + 12 : 16,
           paddingBottom: insets.bottom > 0 ? insets.bottom + 12 : 24,
+          ...(isRTL ? { right: 0, left: 'auto' } : { left: 0, right: 'auto' })
         },
         sidebarBg,
       ]}
@@ -124,8 +123,8 @@ export function TVSidebar() {
         />
 
         <SidebarItem
+          nativeID="tour-search-btn"
           icon="search-outline"
-          bulkIcon={Search1Bulk}
           iosIcon="magnifyingglass"
           isActive={pathname === '/search'}
           onPress={() => router.navigate({ pathname: '/search', params: { tab: 'all' } })}
@@ -134,7 +133,7 @@ export function TVSidebar() {
 
         <View style={styles.divider} />
 
-        {TABS.map((tab) => {
+        {MAIN_TABS.map((tab: any) => {
           const isActive =
             tab.path === '/'
               ? pathname === '/'
@@ -158,11 +157,17 @@ export function TVSidebar() {
 
       <View style={styles.navGroup}>
         <SidebarItem
-          icon="person-outline"
-          bulkIcon={User4Bulk}
-          iosIcon="person"
+          icon="settings-outline"
+          iosIcon="gear"
           isActive={pathname === '/settings'}
-          onPress={() => router.navigate('/settings')}
+          onPress={() => router.navigate('/settings' as any)}
+          isIOS={isIOS}
+        />
+        <SidebarItem
+          icon="person-outline"
+          iosIcon="person"
+          isActive={pathname === '/profile'}
+          onPress={() => router.navigate('/profile' as any)}
           isIOS={isIOS}
         />
         {isWeb && (

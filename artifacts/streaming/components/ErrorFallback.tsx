@@ -1,5 +1,6 @@
-import { Lineicons } from '@lineiconshq/react-native-lineicons';
-import { QuestionMarkCircleBulk, XmarkBulk } from '@lineiconshq/free-icons';
+import { Ionicons } from "@expo/vector-icons";
+
+
 import { reloadAppAsync } from "expo";
 import React, { useState } from "react";
 import {
@@ -64,7 +65,7 @@ export function ErrorFallback({ error, resetError }: ErrorFallbackProps) {
             },
           ]}
         >
-          <Lineicons icon={QuestionMarkCircleBulk} size={20} color={colors.foreground} />
+          <Ionicons name="help-circle-outline" size={20} color={colors.foreground} />
         </TVFocusable>
       ) : null}
 
@@ -124,7 +125,7 @@ export function ErrorFallback({ error, resetError }: ErrorFallbackProps) {
                   accessibilityRole="button"
                   style={styles.closeButton}
                 >
-                  <Lineicons icon={XmarkBulk} size={24} color={colors.foreground} />
+                  <Ionicons name="close" size={24} color={colors.foreground} />
                 </TVFocusable>
               </View>
 

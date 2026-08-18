@@ -2,6 +2,7 @@ import React from 'react';
 import { View, Text, StyleSheet, FlatList } from 'react-native';
 import { useColors } from '@/hooks/useColors';
 import { TVFocusable } from '@/components/TVFocusable';
+import { useTranslation } from '@/hooks/useTranslation';
 
 interface ContentRowProps {
   title: string;
@@ -14,13 +15,14 @@ const Separator = () => <View style={{ width: 12 }} />;
 
 export const ContentRow = React.memo(function ContentRow({ title, data, renderItem, onSeeAll }: ContentRowProps) {
   const colors = useColors();
+  const { t, isRTL } = useTranslation();
 
   if (!data || data.length === 0) return null;
 
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={[styles.title, { color: colors.text, flex: 1, marginRight: 16 }]} numberOfLines={1}>{title}</Text>
+        <Text style={[styles.title, { color: colors.text, flex: 1, marginRight: isRTL ? 0 : 16, marginLeft: isRTL ? 16 : 0, textAlign: isRTL ? 'right' : 'left' }]} numberOfLines={1}>{title}</Text>
         {onSeeAll && (
           <TVFocusable 
             onPress={onSeeAll}
@@ -32,7 +34,7 @@ export const ContentRow = React.memo(function ContentRow({ title, data, renderIt
             scaleAmount={1.05}
           >
             {({ focused }: any) => (
-              <Text style={[styles.seeAll, { color: focused ? colors.gold : colors.mutedForeground }]}>See all →</Text>
+              <Text style={[styles.seeAll, { color: focused ? colors.gold : colors.mutedForeground }]}>{t('see_all')} {isRTL ? '←' : '→'}</Text>
             )}
           </TVFocusable>
         )}

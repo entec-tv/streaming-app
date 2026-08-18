@@ -1,11 +1,12 @@
+import { Ionicons } from "@expo/vector-icons";
 import React from 'react';
 import { View, Text, StyleSheet, Modal, Platform } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { useAppStore } from '@/store/app-store';
 import { useColors } from '@/hooks/useColors';
 import { TVFocusable } from '@/components/TVFocusable';
-import { Lineicons } from '@lineiconshq/react-native-lineicons';
-import { Shield2Bulk } from '@lineiconshq/free-icons';
+
+
 
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 
@@ -20,7 +21,7 @@ export function GlobalAlert() {
       <BlurView intensity={Platform.OS === 'ios' ? 80 : 100} style={StyleSheet.absoluteFillObject} tint="dark" />
       <View style={[styles.alertBox, { backgroundColor: '#1A1A1A', borderColor: colors.gold }]}>
         <View style={styles.iconContainer}>
-          <Lineicons icon={Shield2Bulk} size={48} color={colors.gold} />
+          <Ionicons name="shield-checkmark-outline" size={48} color={colors.gold} />
         </View>
         <Text style={[styles.title, { color: colors.text }]}>{globalAlert.title}</Text>
         <Text style={[styles.message, { color: colors.mutedForeground }]}>{globalAlert.message}</Text>

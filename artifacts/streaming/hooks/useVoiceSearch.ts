@@ -1,10 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Platform } from 'react-native';
+import { Platform, NativeModules } from 'react-native';
 
 let Voice: any = null;
 if (Platform.OS !== 'web') {
   try {
-    Voice = require('@react-native-voice/voice').default;
+    // Only initialize if the native module is actually linked (prevents crash in standard Expo Go)
+    if (NativeModules.Voice) {
+      Voice = require('@react-native-voice/voice').default;
+    } else {
+      console.warn("NativeModules.Voice is null. Voice search will be disabled.");
+    }
   } catch (e) {
     console.error("Voice module not found", e);
   }

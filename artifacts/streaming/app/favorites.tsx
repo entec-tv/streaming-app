@@ -1,21 +1,20 @@
+import { Ionicons } from "@expo/vector-icons";
 import React, { useState } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   FlatList,
-  Pressable,
   Dimensions
 } from 'react-native';
 import { useColors } from '@/hooks/useColors';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Lineicons } from '@lineiconshq/react-native-lineicons';
-import { HeartBulk, ArrowLeftBulk } from '@lineiconshq/free-icons';
 import { Image } from 'expo-image';
 import { router } from 'expo-router';
 import { TVFocusable } from '@/components/TVFocusable';
 import { useAppStore } from '@/store/app-store';
 import { Channel } from '@/types';
+import { useTranslation } from '@/hooks/useTranslation';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -24,6 +23,7 @@ type TabType = 'live' | 'vod' | 'series';
 export default function FavoritesScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  const { t } = useTranslation();
 
   const favoriteItems = useAppStore((s) => s.favoriteItems) || [];
   const toggleFavorite = useAppStore((s) => s.toggleFavorite);
@@ -96,7 +96,7 @@ export default function FavoritesScreen() {
         >
           <View style={isLive ? styles.liveLogoWrapper : styles.posterWrapper}>
             <Image
-              source={{ uri: item.logo || `https://ui-avatars.com/api/?name=${encodeURIComponent(item.name)}&background=1A1A1A&color=D4A843&bold=true&size=150&format=svg` }}
+              source={{ uri: item.logo || `https://ui-avatars.com/api/?name=${encodeURIComponent(item.name)}&background=1A1A1A&color=${colors.gold.replace('#', '')}&bold=true&size=150&format=svg` }}
               style={styles.cardImage}
               contentFit={isLive ? "contain" : "cover"}
             />
@@ -110,13 +110,13 @@ export default function FavoritesScreen() {
               onPress={() => toggleFavorite(item)}
               focusable={true}
             >
-              <Lineicons icon={HeartBulk} size={16} color="#E53935" fill="#E53935" />
+              <Ionicons name="heart" size={16} color="#E53935" fill="#E53935" />
             </TVFocusable>
 
             {isLive && (
               <View style={styles.liveIndicator}>
                 <View style={styles.liveDot} />
-                <Text style={styles.liveText}>LIVE</Text>
+                <Text style={styles.liveText}>{t('live')}</Text>
               </View>
             )}
           </View>
@@ -125,7 +125,7 @@ export default function FavoritesScreen() {
             <Text style={[styles.cardTitle, { color: colors.text }]} numberOfLines={1}>
               {item.name}
             </Text>
-            <Text style={[styles.cardCategory, { color: colors.mutedForeground }]} numberOfLines={1}>
+            <Text style={[styles.cardPackage, { color: colors.mutedForeground }]} numberOfLines={1}>
               {item.category}
             </Text>
           </View>
@@ -141,7 +141,7 @@ export default function FavoritesScreen() {
   ];
 
   return (
-    <View style={[styles.container, { backgroundColor: colors.background, paddingTop: insets.top }]}>
+    <View style={[styles.container, { backgroundColor: 'transparent', paddingTop: insets.top }]}>
       <View style={styles.header}>
         <TVFocusable 
           style={({ focused }: any) => [
@@ -152,10 +152,10 @@ export default function FavoritesScreen() {
           focusable={true}
         >
           {({ focused }: any) => (
-            <Lineicons icon={ArrowLeftBulk} size={24} color={focused ? colors.gold : colors.text} />
+            <Ionicons name="chevron-back" size={24} color={focused ? colors.gold : colors.text} />
           )}
         </TVFocusable>
-        <Text style={[styles.headerTitle, { color: colors.text }]}>Favorites</Text>
+        <Text style={[styles.headerTitle, { color: colors.text }]}>{t('favorites')}</Text>
         <View style={{ width: 40 }} />
       </View>
 
@@ -198,7 +198,7 @@ export default function FavoritesScreen() {
         ]}
         ListEmptyComponent={
           <View style={styles.emptyState}>
-            <Lineicons icon={HeartBulk} size={48} color={colors.mutedForeground} style={{ marginBottom: 16 }} />
+            <Ionicons name="heart" size={48} color={colors.mutedForeground} style={{ marginBottom: 16 }} />
             <Text style={[styles.emptyText, { color: colors.text }]}>
               No favorites added yet
             </Text>
@@ -325,7 +325,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: 'bold',
   },
-  cardCategory: {
+  cardPackage: {
     fontSize: 11,
     marginTop: 2,
   },

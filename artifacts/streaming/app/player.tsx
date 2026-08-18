@@ -1,5 +1,6 @@
 import { Lineicons } from '@lineiconshq/react-native-lineicons';
 import { VolumeMuteBulk, VolumeLowBulk, VolumeHighBulk } from '@lineiconshq/free-icons';
+import { Ionicons } from '@expo/vector-icons';
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   View,
@@ -14,6 +15,8 @@ import {
   Alert,
   InteractionManager,
   useWindowDimensions,
+  I18nManager,
+  ScrollView,
 } from 'react-native';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import * as Clipboard from 'expo-clipboard';
@@ -23,6 +26,7 @@ import { TVFocusable } from '@/components/TVFocusable';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { useEvent } from 'expo';
 import { WebVideoPlayer, WebVideoPlayerRef } from '@/components/WebVideoPlayer';
+import { base64Encode, base64Decode } from '@/lib/base64';
 import { StatusBar } from 'expo-status-bar';
 import * as NavigationBar from 'expo-navigation-bar';
 import { StatusBar as RNStatusBar } from 'react-native';
@@ -31,6 +35,7 @@ import { useColors } from '@/hooks/useColors';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppStore } from '@/store/app-store';
+import { useTranslation } from '@/hooks/useTranslation';
 
 // Removed static W, H
 
@@ -43,10 +48,23 @@ function formatTime(sec: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+function decodeIfNeeded(str?: string) {
+  if (!str) return '';
+  if (str.startsWith('http') || str.startsWith('data:') || str.startsWith('file:')) return str;
+  try {
+    const decoded = base64Decode(str);
+    if (decoded.startsWith('http')) return decoded;
+    return str;
+  } catch {
+    return str;
+  }
+}
+
 export default function PlayerScreen() {
   const colors = useColors();
+  const { t } = useTranslation();
   const insets = useSafeAreaInsets();
-  const params = useLocalSearchParams<{
+  const routerParams = useLocalSearchParams<{
     id?: string;
     streamUrl: string;
     title?: string;
@@ -58,20 +76,28 @@ export default function PlayerScreen() {
     category?: string;
     poster?: string;
     backdrop?: string;
+    name?: string;
     description?: string;
     autoResume?: string;
+    type?: string;
+    duration?: string;
   }>();
 
-  const streamUrl = params.streamUrl ?? '';
-  const title = params.title ?? 'Streaming';
-  const isLive = params.isLive === 'true';
-  const current = params.current ?? '';
-  const next = params.next ?? '';
+  const [activeChannel, setActiveChannel] = useState(routerParams);
+
+  const streamUrl = decodeIfNeeded(activeChannel.streamUrl ?? '');
+  const title = activeChannel.title || activeChannel.name || 'Streaming';
+  const isLive = String(activeChannel.isLive) === 'true';
+  const current = activeChannel.current ?? '';
+  const next = activeChannel.next ?? '';
 
   const [showControls, setShowControls] = useState(true);
+  const showControlsRef = useRef(true);
+  useEffect(() => { showControlsRef.current = showControls; }, [showControls]);
   const [isPlaying, setIsPlaying] = useState(true);
   const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
+  const initialDuration = parseInt(activeChannel.duration || '0', 10);
+  const [duration, setDuration] = useState(initialDuration || 0);
 
   const durationRef = useRef(0);
   const currentTimeRef = useRef(0);
@@ -100,7 +126,30 @@ export default function PlayerScreen() {
   const setPlaybackIndex = useAppStore((s) => s.setPlaybackIndex);
 
   const continueWatching = useAppStore((s) => s.continueWatching) || [];
+  const isTV = Platform.isTV;
+  const { width, height } = useWindowDimensions();
+  const isSmallScreen = width < 768;
   const updateContinueWatching = useAppStore((s) => s.updateContinueWatching);
+  const setLastWatchedChannel = useAppStore((s) => s.setLastWatchedChannel);
+  const moreOptions = useAppStore((s) => s.moreOptions);
+  const settings = useAppStore((s) => s.settings);
+  const [resolvedStreamUrl, setResolvedStreamUrl] = useState<string | null>(null);
+  const [isResolvingUrl, setIsResolvingUrl] = useState(false);
+
+  const [audioTracks, setAudioTracks] = useState<any[]>([]);
+  const [subtitleTracks, setSubtitleTracks] = useState<any[]>([]);
+  const [selectedAudio, setSelectedAudio] = useState<any>(null);
+  const [selectedSubtitle, setSelectedSubtitle] = useState<any>(null);
+  const [showTracksModal, setShowTracksModal] = useState(false);
+  const [currentSubtitle, setCurrentSubtitle] = useState('');
+
+  // Set last watched channel when player mounts
+  useEffect(() => {
+    if (activeChannel && activeChannel.streamUrl) {
+      setLastWatchedChannel(activeChannel);
+    }
+  }, [activeChannel]);
+
   const removeFromContinueWatching = useAppStore((s) => s.removeFromContinueWatching);
   const showGlobalAlert = useAppStore((s) => s.showGlobalAlert);
   const hideGlobalAlert = useAppStore((s) => s.hideGlobalAlert);
@@ -108,7 +157,7 @@ export default function PlayerScreen() {
 
 
   const matchedFavoriteItem = favoriteItems.find(
-    (item) => item.streamUrl === streamUrl || (params.id && item.id === params.id)
+    (item) => item.streamUrl === streamUrl || (activeChannel.id && item.id === activeChannel.id)
   );
   const isFavorite = !!matchedFavoriteItem;
 
@@ -117,14 +166,14 @@ export default function PlayerScreen() {
       toggleFavorite(matchedFavoriteItem);
     } else {
       const newItem: any = {
-        id: params.id || `stream_${encodeURIComponent(streamUrl).substring(0, 30)}`,
+        id: activeChannel.id || `stream_${encodeURIComponent(streamUrl).substring(0, 30)}`,
         name: title,
-        logo: params.logo || '',
-        category: params.category || 'Uncategorized',
+        logo: activeChannel.logo || '',
+        category: activeChannel.category || 'Uncategorized',
         streamUrl: streamUrl,
         current: current,
         next: next,
-        quality: params.quality || 'HD',
+        quality: activeChannel.quality || 'HD',
         isLive: isLive,
         type: isLive ? 'live' : 'vod'
       };
@@ -132,32 +181,36 @@ export default function PlayerScreen() {
     }
   };
 
-  const { width: W } = useWindowDimensions();
+  const { width: W, height: H } = useWindowDimensions();
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seekBarWidth = useRef(W - 40);
   const seekStartX = useRef(0);
   const controlsOpacity = useRef(new Animated.Value(1)).current;
   const hasAutoResumed = useRef(false);
 
-  const matchedWatchedRef = useRef(continueWatching.find(item => item.streamUrl === streamUrl || (params.id && item.id === params.id)));
+  const matchedWatchedRef = useRef(continueWatching.find(item => item.streamUrl === streamUrl || (activeChannel.id && item.id === activeChannel.id)));
   const matchedWatched = matchedWatchedRef.current;
-  const shouldPrompt = !isLive && params.autoResume !== 'true' && matchedWatched && matchedWatched.progress > 10 && matchedWatched.duration > 0 && matchedWatched.progress < matchedWatched.duration - 30;
+  const shouldPrompt = !isLive && activeChannel.autoResume !== 'true' && matchedWatched && matchedWatched.progress > 10 && matchedWatched.duration > 0 && matchedWatched.progress < matchedWatched.duration - 30;
 
   const [promptVisible, setPromptVisible] = useState(!!shouldPrompt);
   const isFocused = useIsFocused();
+  const [probeComplete, setProbeComplete] = useState(false);
+  const [detectedCodec, setDetectedCodec] = useState<string | null>(null);
 
-  let finalStreamUrl = streamUrl;
-  if (Platform.OS === 'web' && isLive && finalStreamUrl && finalStreamUrl.includes('.ts')) {
-    finalStreamUrl = finalStreamUrl.replace(/\.ts(\?|$)/i, '.m3u8$1');
-  }
-  
+  let finalStreamUrl = resolvedStreamUrl ?? streamUrl;
   let proxiedUrl = finalStreamUrl;
   if (Platform.OS === 'web' && finalStreamUrl) {
     if (!finalStreamUrl.startsWith('http')) {
       // Local file
       proxiedUrl = `/api/local-video?path=${encodeURIComponent(finalStreamUrl.replace('file://', ''))}`;
-    } else {
+    } else if (isLive) {
       proxiedUrl = `/proxy?url=${encodeURIComponent(finalStreamUrl)}`;
+    } else if (!isLive && !finalStreamUrl.includes('.m3u8')) {
+      // Use proxy-vod for movies to transcode AC3/DTS audio to AAC
+      proxiedUrl = `/proxy-vod?url=${encodeURIComponent(finalStreamUrl)}`;
+    } else {
+      // HLS VOD can also bypass proxy
+      proxiedUrl = finalStreamUrl;
     }
   }
 
@@ -174,19 +227,124 @@ export default function PlayerScreen() {
     return () => setIsPlayerOpen(false);
   }, []);
 
+  // Resolve redirect URL if option is ON
+  useEffect(() => {
+    if (!moreOptions.streamUrlRedirectionCheck || !streamUrl || isLive) return;
+    setIsResolvingUrl(true);
+    fetch(streamUrl, { method: 'HEAD', redirect: 'follow' })
+      .then(res => {
+        if (res.url && res.url !== streamUrl) {
+          console.log('[Player] Resolved redirect:', res.url);
+          setResolvedStreamUrl(res.url);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setIsResolvingUrl(false));
+  }, [streamUrl, moreOptions.streamUrlRedirectionCheck]);
+
+  // Handle External Player for Android
+  useEffect(() => {
+    const preferredPlayer = isLive ? settings.liveTvPlayer : settings.vodPlayer;
+    if (preferredPlayer === 'android' && proxiedUrl && Platform.OS !== 'web') {
+      let urlToOpen = proxiedUrl;
+      if (Platform.OS === 'android') {
+        const urlWithoutScheme = proxiedUrl.replace(/^https?:\/\//, '');
+        const scheme = proxiedUrl.startsWith('https') ? 'https' : 'http';
+        urlToOpen = `intent://${urlWithoutScheme}#Intent;scheme=${scheme};type=video/*;action=android.intent.action.VIEW;end;`;
+      }
+      
+      const openPlayer = async () => {
+        try {
+          console.log('[Player]: Opening external player for:', urlToOpen);
+          await Linking.openURL(urlToOpen);
+        } catch (err) {
+          console.log("Failed to open external player via intent, falling back to URL:", err);
+          try {
+            await Linking.openURL(proxiedUrl);
+          } catch (e) {
+            console.error("Failed to open proxied URL:", e);
+            Alert.alert("Error", "No compatible video player or browser found to open this stream.");
+          }
+        } finally {
+          // Return to previous screen as the external app is now handling playback
+          if (router.canGoBack()) {
+            router.back();
+          } else {
+            router.replace('/');
+          }
+        }
+      };
+
+      openPlayer();
+    }
+  }, [settings.liveTvPlayer, settings.vodPlayer, proxiedUrl, isLive]);
+
+  // Probe VOD for duration and codec BEFORE playback
+  useEffect(() => {
+    if (Platform.OS === 'web' && proxiedUrl?.includes('/proxy-vod')) {
+      setProbeComplete(false);
+      const baseProbeUrl = proxiedUrl.replace('/proxy-vod', '/probe-vod');
+      fetch(baseProbeUrl)
+        .then(res => res.json())
+        .then(data => {
+          if (data && data.duration > 0) setDuration(data.duration);
+          if (data && data.codec) setDetectedCodec(data.codec);
+        })
+        .catch(console.error)
+        .finally(() => setProbeComplete(true));
+    } else {
+      setProbeComplete(true);
+    }
+  }, [proxiedUrl]);
+
+  // Probe tracks BEFORE playback
+  useEffect(() => {
+    if (Platform.OS === 'web' && proxiedUrl?.includes('/proxy-vod')) {
+      const baseProbeUrl = proxiedUrl.replace('/proxy-vod', '/probe-tracks');
+      fetch(baseProbeUrl)
+        .then(res => res.json())
+        .then(data => {
+          if (data) {
+            setAudioTracks(data.audioTracks || []);
+            setSubtitleTracks(data.subtitleTracks || []);
+          }
+        })
+        .catch(console.error);
+    } else {
+      setAudioTracks([]);
+      setSubtitleTracks([]);
+    }
+  }, [proxiedUrl]);
+
   const videoSource = React.useMemo(() => {
     if (!proxiedUrl) return null;
-    const isHls = proxiedUrl.includes('.m3u8');
+    let finalUrl = detectedCodec && proxiedUrl.includes('/proxy-vod')
+      ? `${proxiedUrl}&codec=${detectedCodec}`
+      : proxiedUrl;
+      
+    if (selectedAudio !== null && finalUrl.includes('/proxy-vod')) {
+      finalUrl += `&audioTrack=${selectedAudio}`;
+    }
+
+    const isHls = finalUrl.includes('.m3u8');
     return { 
-      uri: proxiedUrl, 
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
+      uri: finalUrl, 
+      headers: { 'User-Agent': 'VLC/3.0.0' }
     } as any;
-  }, [proxiedUrl]);
+  }, [proxiedUrl, detectedCodec, selectedAudio]);
 
   const player = useVideoPlayer(Platform.OS === 'web' ? null : videoSource, (p) => {
     p.volume = 1;
-    if (params.autoResume === 'true' && matchedWatched) {
-      p.currentTime = matchedWatched.progress;
+    if (Platform.OS === 'android') {
+      try {
+        p.bufferOptions = {
+          preferredForwardBufferDuration: 60, // Buffer up to 60s
+          minBufferForPlayback: 2,           // Start playing when 2s is ready
+          maxBufferBytes: 50 * 1024 * 1024,  // Max 50MB memory buffer
+        };
+      } catch (e) {
+        console.log('Failed to set bufferOptions', e);
+      }
     }
     if (!shouldPrompt) {
       p.play();
@@ -203,7 +361,7 @@ export default function PlayerScreen() {
     if (player && videoSource && Platform.OS !== 'web') {
       try {
         if (player.replaceAsync) {
-          player.replaceAsync(videoSource);
+          player.replaceAsync(videoSource).catch((err) => console.log('replaceAsync error:', err));
         } else {
           player.replace(videoSource);
         }
@@ -220,6 +378,16 @@ export default function PlayerScreen() {
     if (status?.status === 'readyToPlay') {
       setIsBuffering(false);
       setHasError(false);
+      
+      if (activeChannel.autoResume === 'true' && matchedWatched && !hasAutoResumed.current && player) {
+        try {
+          player.currentTime = matchedWatched.progress;
+        } catch (e) {
+          console.warn('Failed to seek on readyToPlay', e);
+        }
+        hasAutoResumed.current = true;
+      }
+
       if (shouldPrompt) {
         setIsPlaying(false);
       } else {
@@ -241,7 +409,7 @@ export default function PlayerScreen() {
               setIsBuffering(true);
               setHasError(false);
               if (player.replaceAsync) {
-                player.replaceAsync(videoSource);
+                player.replaceAsync(videoSource).catch((err) => console.log('retry replaceAsync error:', err));
               } else {
                 player.replace(videoSource);
               }
@@ -309,8 +477,16 @@ export default function PlayerScreen() {
     const interval = setInterval(() => {
       try {
         if (player.status === 'readyToPlay') {
-          setCurrentTime(player.currentTime);
-          if (player.duration) setDuration(player.duration);
+          // Always update the ref so continueWatching logic has accurate time
+          currentTimeRef.current = player.currentTime;
+          
+          // Only trigger a React re-render if the UI needs it
+          if (showControlsRef.current) {
+            setCurrentTime(player.currentTime);
+          }
+          if (player.duration && player.duration !== duration) {
+            setDuration(player.duration);
+          }
         }
       } catch (_) {}
     }, 500);
@@ -332,48 +508,27 @@ export default function PlayerScreen() {
       } catch (_) {}
       
       // Update continue watching
-      if (streamUrl && !isLive && durationRef.current > 0 && currentTimeRef.current > 10) {
+      if (streamUrl && !isLive && currentTimeRef.current > 10) {
+        const itemType = activeChannel.type === 'series' ? 'series' : 'vod';
         updateContinueWatching({
-          id: params.id || streamUrl,
-          type: 'vod',
+          id: activeChannel.id || streamUrl,
+          type: itemType,
           title: title,
-          poster: params.poster || params.logo || '',
-          backdrop: params.backdrop || '',
+          poster: decodeIfNeeded(activeChannel.poster || activeChannel.logo || ''),
+          backdrop: decodeIfNeeded(activeChannel.backdrop || ''),
           streamUrl,
           progress: currentTimeRef.current,
           duration: durationRef.current,
           timestamp: Date.now(),
-          quality: params.quality,
-          description: params.description,
-          category: params.category
+          quality: activeChannel.quality,
+          description: activeChannel.description,
+          category: activeChannel.category
         });
       }
     };
   }, []); // Run cleanup ONLY on unmount, not every second!
 
-  const lockLandscape = async () => {
-    if (Platform.OS !== 'web') {
-      try {
-        await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
-      } catch (e) {
-        console.warn('Orientation lock failed', e);
-      }
-    }
-  };
-
-  const unlockOrientation = async () => {
-    if (Platform.OS !== 'web') {
-      try {
-        await ScreenOrientation.unlockAsync();
-      } catch (e) {
-        console.warn('Orientation unlock failed', e);
-      }
-    }
-  };
-
   useEffect(() => {
-    let interactionTask: any;
-    
     const enableImmersive = async () => {
       if (Platform.OS === 'android') {
         try {
@@ -385,18 +540,13 @@ export default function PlayerScreen() {
       }
     };
 
-    interactionTask = InteractionManager.runAfterInteractions(() => {
-      enableImmersive();
-      lockLandscape();
-    });
+    enableImmersive();
 
     return () => {
-      if (interactionTask) interactionTask.cancel();
       if (hideTimer.current) clearTimeout(hideTimer.current);
       
-      // Delay unlock to not block JS thread during unmount
+      // Restore UI on unmount
       setTimeout(async () => {
-        await unlockOrientation();
         if (Platform.OS === 'android') {
           try {
             await NavigationBar.setVisibilityAsync("visible");
@@ -406,7 +556,6 @@ export default function PlayerScreen() {
           RNStatusBar.setHidden(false, 'none');
         }
       }, 50);
-      
       setIsPlayerOpen(false);
     };
   }, []);
@@ -439,6 +588,7 @@ export default function PlayerScreen() {
   const seekTo = useCallback((ratio: number) => {
     const currentDuration = durationRef.current;
     const target = Math.max(0, Math.min(currentDuration, ratio * currentDuration));
+    setCurrentSubtitle(''); // Instantly clear subtitle on seek
     if (Platform.OS === 'web') {
       webPlayerRef.current?.seek(target);
       setCurrentTime(target);
@@ -452,7 +602,7 @@ export default function PlayerScreen() {
     resetTimer();
     setSeeking(true);
     const newX = Math.max(0, Math.min(seekBarWidth.current, seekStartX.current + gestureState.dx));
-    const ratio = newX / seekBarWidth.current;
+    let ratio = newX / seekBarWidth.current;
     const val = ratio * durationRef.current;
     seekPreviewVal.current = val;
     setSeekPreview(val);
@@ -473,7 +623,7 @@ export default function PlayerScreen() {
         const tapX = evt.nativeEvent.locationX;
         seekStartX.current = tapX;
         const currentDuration = durationRef.current;
-        const ratio = Math.max(0, Math.min(1, tapX / seekBarWidth.current));
+        let ratio = Math.max(0, Math.min(1, tapX / seekBarWidth.current));
         const val = ratio * currentDuration;
         seekPreviewVal.current = val;
         setSeeking(true);
@@ -494,7 +644,11 @@ export default function PlayerScreen() {
         const sliderH = 120;
         const ratio = 1 - Math.max(0, Math.min(1, evt.nativeEvent.locationY / sliderH));
         setVolume(ratio);
-        if (player) player.volume = ratio;
+        if (Platform.OS === 'web') {
+          webPlayerRef.current?.setVolume(ratio);
+        } else {
+          if (player) player.volume = ratio;
+        }
       },
     })
   ).current;
@@ -513,6 +667,7 @@ export default function PlayerScreen() {
   };
 
   const handleSeekBy = (secs: number) => {
+    setCurrentSubtitle(''); // Instantly clear subtitle on seek
     if (Platform.OS === 'web') {
        const target = Math.max(0, Math.min(duration, currentTime + secs));
        webPlayerRef.current?.seek(target);
@@ -524,41 +679,57 @@ export default function PlayerScreen() {
     player.currentTime = target;
   };
 
+  const isSeries = activeChannel.type === 'series';
+
   const handlePrevChannel = () => {
     if (playbackQueue.length <= 1) return;
-    const prevIdx = (playbackIndex - 1 + playbackQueue.length) % playbackQueue.length;
+    if (isSeries && playbackIndex === 0) return;
+
+    const prevIdx = isSeries ? playbackIndex - 1 : (playbackIndex - 1 + playbackQueue.length) % playbackQueue.length;
     setPlaybackIndex(prevIdx);
     const ch = playbackQueue[prevIdx];
-    router.setParams({
+    setActiveChannel(prev => ({
+      ...prev,
       id: ch.id,
       streamUrl: ch.streamUrl,
-      title: ch.name,
-      isLive: 'true',
+      title: ch.name || ch.title,
+      isLive: ch.isLive ? 'true' : 'false',
       current: ch.current || '',
       next: ch.next || '',
       quality: ch.quality || 'HD',
-      logo: ch.logo || '',
-      category: ch.category || ''
-    });
+      logo: ch.logo || ch.poster || '',
+      category: ch.category || '',
+      poster: ch.poster ? base64Encode(ch.poster) : '',
+      backdrop: ch.backdrop ? base64Encode(ch.backdrop) : '',
+    }));
   };
 
   const handleNextChannel = () => {
     if (playbackQueue.length <= 1) return;
-    const nextIdx = (playbackIndex + 1) % playbackQueue.length;
+    if (isSeries && playbackIndex === playbackQueue.length - 1) return;
+
+    const nextIdx = isSeries ? playbackIndex + 1 : (playbackIndex + 1) % playbackQueue.length;
     setPlaybackIndex(nextIdx);
     const ch = playbackQueue[nextIdx];
-    router.setParams({
+    setActiveChannel(prev => ({
+      ...prev,
       id: ch.id,
       streamUrl: ch.streamUrl,
-      title: ch.name,
-      isLive: 'true',
+      title: ch.name || ch.title,
+      isLive: ch.isLive ? 'true' : 'false',
       current: ch.current || '',
       next: ch.next || '',
       quality: ch.quality || 'HD',
-      logo: ch.logo || '',
-      category: ch.category || ''
-    });
+      logo: ch.logo || ch.poster || '',
+      category: ch.category || '',
+      poster: ch.poster ? base64Encode(ch.poster) : '',
+      backdrop: ch.backdrop ? base64Encode(ch.backdrop) : '',
+    }));
   };
+
+  const isCatchup = streamUrl.includes('/timeshift/') || activeChannel.type === 'catchup';
+  const hasPrev = !isCatchup && playbackQueue.length > 1 && (!isSeries || playbackIndex > 0);
+  const hasNext = !isCatchup && playbackQueue.length > 1 && (!isSeries || playbackIndex < playbackQueue.length - 1);
 
   const toggleLiveSync = () => {
     setIsLiveSync(prev => {
@@ -590,37 +761,7 @@ export default function PlayerScreen() {
   };
 
   const toggleSubtitles = () => {
-    if (Platform.OS === 'web') {
-      if (webPlayerRef.current && webPlayerRef.current.toggleSubtitle) {
-         const res = webPlayerRef.current.toggleSubtitle();
-         if (res === false) {
-           showGlobalAlert("Subtitles (CC)", "No embedded subtitles found for this stream.", "OK", () => hideGlobalAlert());
-         } else if (res === null) {
-           showGlobalAlert("Subtitles (CC)", "Off", "OK", () => hideGlobalAlert());
-         } else {
-           showGlobalAlert("Subtitles (CC)", res, "OK", () => hideGlobalAlert());
-         }
-      }
-      showControlsNow();
-      return;
-    }
-    if (!player) return;
-    const tracks = player.availableSubtitleTracks || [];
-    if (tracks.length === 0) {
-      showGlobalAlert("Subtitles (CC)", "No embedded subtitles found for this stream.", "OK", () => hideGlobalAlert());
-      return;
-    }
-    
-    const currentIndex = tracks.findIndex(t => t === player.subtitleTrack);
-    const nextIndex = currentIndex + 1;
-    
-    if (nextIndex >= tracks.length) {
-      player.subtitleTrack = null;
-      showGlobalAlert("Subtitles (CC)", "Off", "OK", () => hideGlobalAlert());
-    } else {
-      player.subtitleTrack = tracks[nextIndex];
-      showGlobalAlert("Subtitles (CC)", tracks[nextIndex].language || `Track ${nextIndex + 1}`, "OK", () => hideGlobalAlert());
-    }
+    setShowTracksModal(true);
     showControlsNow();
   };
 
@@ -666,24 +807,33 @@ export default function PlayerScreen() {
 
   if (!streamUrl) {
     return (
-      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
+      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center', direction: 'ltr' }]}>
         <StatusBar hidden />
         <Lineicons icon={QuestionMarkCircleBulk} size={48} color="#E53935" />
-        <Text style={styles.errorTitle}>No stream URL provided</Text>
-        <TVFocusable style={styles.retryBtn} onPress={() => { if (router.canGoBack()) { router.back(); } else { router.replace('/(tabs)'); } }}>
-          <Text style={styles.retryText}>Go Back</Text>
+        <Text style={styles.errorTitle}>{t('no_stream_url')}</Text>
+        <TVFocusable style={[styles.retryBtn, { backgroundColor: colors.gold }]} onPress={() => { if (router.canGoBack()) { router.back(); } else { router.replace('/(tabs)'); } }}>
+          <Text style={styles.retryText}>{t('go_back')}</Text>
         </TVFocusable>
       </View>
     );
   }
 
+  const isLandscape = width > height;
+  if (!isLandscape && Platform.OS !== 'web' && !Platform.isTV) {
+    return <View style={{ flex: 1, backgroundColor: '#000' }} />;
+  }
+
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { direction: 'ltr' }]}>
       <StatusBar hidden />
 
-      {/* ── Layer 1: Video (pointerEvents none so it never eats touches) ── */}
-      <View style={[StyleSheet.absoluteFill, { justifyContent: 'center', alignItems: 'center' }]} pointerEvents="none">
-        {Platform.OS === 'web' ? (
+      {/* ── Layer 1: Video ── */}
+      <View style={[StyleSheet.absoluteFill, { justifyContent: 'center', alignItems: 'center' }]}>
+        {(!probeComplete && proxiedUrl?.includes('/proxy-vod')) ? (
+          <View style={styles.bufferingOverlay}>
+            <ActivityIndicator size="large" color={colors.gold} />
+          </View>
+        ) : Platform.OS === 'web' ? (
           <View style={
             aspectMode === 3 
               ? { height: '100%', aspectRatio: 4/3, backgroundColor: '#000' }
@@ -693,20 +843,31 @@ export default function PlayerScreen() {
               key={retryKey}
               ref={webPlayerRef}
               source={proxiedUrl || ''}
+              subtitleUrl={selectedSubtitle !== null && proxiedUrl?.includes('/proxy-vod') ? proxiedUrl.replace('/proxy-vod', '/proxy-sub') + `&track=${selectedSubtitle}` : undefined}
+              onSubtitleChange={setCurrentSubtitle}
               paused={!isPlaying}
               muted={isMuted}
               aspectMode={aspectMode}
+              preferredPlayer={isLive ? settings.liveTvPlayer : settings.vodPlayer}
               style={[StyleSheet.absoluteFill, { width: '100%', height: '100%' }]}
               onProgress={(t: number, d: number) => {
                 setCurrentTime(t);
-                setDuration(d);
+                if (proxiedUrl.includes('/proxy-vod')) {
+                   if (durationRef.current === 0) {
+                      if (initialDuration > 0) setDuration(initialDuration);
+                      else if (isFinite(d) && d > 0 && d !== Infinity) setDuration(d);
+                   }
+                } else {
+                   if (isFinite(d) && d > 0 && d !== Infinity) setDuration(d);
+                   else if (durationRef.current === 0 && initialDuration > 0) setDuration(initialDuration);
+                }
               }}
               onReady={() => {
                 setIsBuffering(false);
                 setHasError(false);
                 retryCount.current = 0; // Reset retry count on success
                 
-                if (params.autoResume === 'true' && matchedWatched && !hasAutoResumed.current) {
+                if (activeChannel.autoResume === 'true' && matchedWatched && !hasAutoResumed.current) {
                   webPlayerRef.current?.seek(matchedWatched.progress);
                   hasAutoResumed.current = true;
                 }
@@ -763,12 +924,18 @@ export default function PlayerScreen() {
       {/* ── Layer 2: Buffering spinner ── */}
       {isBuffering && !hasError && (
         <View style={styles.bufferingOverlay} pointerEvents="none">
-          <ActivityIndicator size="large" color="#D4A843" />
+          <ActivityIndicator size="large" color={colors.gold} />
         </View>
       )}
 
       {/* ── Layer 3: Background tap area (toggle controls) ── */}
-      <TVFocusable disableBorder focusable={false} style={[StyleSheet.absoluteFill, { width: '100%', height: '100%' }]} onPress={handleBackgroundTap} />
+      <TVFocusable 
+        disableBorder 
+        focusable={!showControls} 
+        hasTVPreferredFocus={!showControls}
+        style={[StyleSheet.absoluteFill, { width: '100%', height: '100%' }]} 
+        onPress={handleBackgroundTap} 
+      />
 
       {/* ── Layer 4: Controls overlay (box-none so tap layer still works in empty areas) ── */}
       {showControls && (
@@ -794,7 +961,13 @@ export default function PlayerScreen() {
             pointerEvents="box-none"
           >
             <TVFocusable 
-              onPress={() => { if (router.canGoBack()) { router.back(); } else { router.replace('/(tabs)'); } }} 
+              onPress={() => {
+                if (router.canGoBack()) {
+                  router.back();
+                } else {
+                  router.replace('/(tabs)');
+                }
+              }} 
               style={({ focused }: any) => [
                 styles.iconBtn,
                 focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderWidth: 3, borderColor: '#FFF' }
@@ -805,174 +978,47 @@ export default function PlayerScreen() {
               )}
             </TVFocusable>
 
-            <View style={styles.titleBlock} pointerEvents="none">
-              <Text style={styles.titleText} numberOfLines={1}>{title}</Text>
-              
-            </View>
-
-            <View style={styles.topActions} pointerEvents="box-none">
-              <TVFocusable 
-                style={({ focused }: any) => [
-                  styles.aspectBtn,
-                  focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderColor: '#FFF' }
-                ]} 
-                onPress={toggleAspectMode}
-              >
-                {({ focused }: any) => (
-                  <Text style={[styles.aspectBtnText, focused && { color: '#0A0A0A' }]}>
-                    {aspectMode === 0 ? 'FIT' : aspectMode === 1 ? 'FILL' : aspectMode === 2 ? 'STRETCH' : '4:3'}
-                  </Text>
-                )}
-              </TVFocusable>
-              <TVFocusable 
-                style={({ focused }: any) => [
-                  styles.iconBtn,
-                  focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderWidth: 3, borderColor: '#FFF' }
-                ]} 
-                onPress={toggleSubtitles}
-                focusable={true}
-              >
-                {({ focused }: any) => (
-                  <Lineicons icon={Message2Bulk} size={20} color={focused ? "#0A0A0A" : "#FFF"} />
-                )}
-              </TVFocusable>
-
-              <TVFocusable 
-                style={({ focused }: any) => [
-                  styles.iconBtn,
-                  focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderWidth: 3, borderColor: '#FFF' }
-                ]} 
-                onPress={handleToggleFavorite}
-              >
-                {({ focused }: any) => (
-                  <Lineicons
-                    icon={HeartBulk}
-                    size={20}
-                    color={focused ? "#0A0A0A" : (isFavorite ? '#E53935' : '#FFF')}
-                    fill={isFavorite ? '#E53935' : 'transparent'}
-                  />
-                )}
-              </TVFocusable>
+            <View style={[styles.titleBlock, { flexDirection: 'row', alignItems: 'center' }]} pointerEvents="none">
+              <Text style={[styles.titleText, { flexShrink: 1 }]} numberOfLines={1}>{title}</Text>
+              {(() => {
+                 const textToCheck = `${title || ''} ${activeChannel.category || ''}`.toLowerCase();
+                 const isDubbed = textToCheck.includes('dubbed') || textToCheck.includes('dual audio');
+                 if (isDubbed) {
+                   return (
+                     <View style={{ backgroundColor: 'rgba(212,168,67,0.3)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, marginLeft: 8 }}>
+                       <Text style={{ color: colors.gold, fontSize: 10, fontWeight: 'bold' }}>{t('multi_dubbed')}</Text>
+                     </View>
+                   );
+                 }
+                 return null;
+              })()}
             </View>
           </View>
-          {/* Center play controls */}
-          <View style={styles.centerRow} pointerEvents="box-none">
-            {isLive ? (
-              <TVFocusable
-                style={({ focused }: any) => [
-                  styles.centerBtn, 
-                  playbackQueue.length <= 1 && { opacity: 0.3 },
-                  focused && { transform: [{ scale: 1.1 }], backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 12, borderWidth: 3, borderColor: '#FFF' }
-                ]}
-                onPress={handlePrevChannel}
-                disabled={playbackQueue.length <= 1}
-              >
-                {({ focused }: any) => (
-                  <>
-                    <Lineicons icon={PreviousStep2Bulk} size={32} color={focused ? colors.gold : "#FFF"} />
-                    <Text style={[styles.seekLabel, focused && { color: colors.gold }]}>Prev Channel</Text>
-                  </>
-                )}
-              </TVFocusable>
-            ) : (
-              <TVFocusable 
-                style={({ focused }: any) => [
-                  styles.centerBtn,
-                  focused && { transform: [{ scale: 1.1 }], backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 12, borderWidth: 3, borderColor: '#FFF' }
-                ]} 
-                onPress={() => handleSeekBy(-10)}
-                focusable={true}
-              >
-                {({ focused }: any) => (
-                  <>
-                    <Lineicons icon={ShiftLeftBulk} size={32} color={focused ? colors.gold : "#FFF"} />
-                    <Text style={[styles.seekLabel, focused && { color: colors.gold }]}>10</Text>
-                  </>
-                )}
-              </TVFocusable>
-            )}
-
-            <TVFocusable 
-              style={({ focused }: any) => [
-                styles.playBtn,
-                focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderWidth: 3, borderColor: '#FFF', shadowColor: colors.gold, shadowOpacity: 0.8, shadowRadius: 10 }
-              ]} 
-              onPress={togglePlay}
-              focusable={true}
-              hasTVPreferredFocus={true}
-            >
-              {({ focused }: any) => (
-                <Lineicons icon={isPlaying  ? PauseBulk : PlayBulk} size={38} color={focused ? "#0A0A0A" : "#FFF"} />
-              )}
-            </TVFocusable>
-
-            {isLive ? (
-              <TVFocusable
-                style={({ focused }: any) => [
-                  styles.centerBtn, 
-                  playbackQueue.length <= 1 && { opacity: 0.3 },
-                  focused && { transform: [{ scale: 1.1 }], backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 12, borderWidth: 3, borderColor: '#FFF' }
-                ]}
-                onPress={handleNextChannel}
-                disabled={playbackQueue.length <= 1}
-                focusable={true}
-              >
-                {({ focused }: any) => (
-                  <>
-                    <Lineicons icon={NextStep2Bulk} size={32} color={focused ? colors.gold : "#FFF"} />
-                    <Text style={[styles.seekLabel, focused && { color: colors.gold }]}>Next Channel</Text>
-                  </>
-                )}
-              </TVFocusable>
-            ) : (
-              <TVFocusable 
-                style={({ focused }: any) => [
-                  styles.centerBtn,
-                  focused && { transform: [{ scale: 1.1 }], backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 12, borderWidth: 3, borderColor: '#FFF' }
-                ]} 
-                onPress={() => handleSeekBy(10)}
-                focusable={true}
-              >
-                {({ focused }: any) => (
-                  <>
-                    <Lineicons icon={ShiftRightBulk} size={32} color={focused ? colors.gold : "#FFF"} />
-                    <Text style={[styles.seekLabel, focused && { color: colors.gold }]}>10</Text>
-                  </>
-                )}
-              </TVFocusable>
-            )}
-          </View>
-
-
 
           {/* Bottom bar */}
           <View style={styles.bottomBar} pointerEvents="box-none">
             {isLive ? (
-              <View style={styles.liveRow} pointerEvents="none">
+              <View style={[styles.liveRow, { marginBottom: 16 }]} pointerEvents="none">
                 <View style={styles.liveBadge}>
                   <View style={styles.liveDot} />
-                  <Text style={styles.liveBadgeText}>LIVE</Text>
+                  <Text style={styles.liveBadgeText}>{t('live')}</Text>
                 </View>
                 <View style={styles.liveInfo}>
                   <Text style={styles.liveChannel} numberOfLines={1}>{title}</Text>
-                  
                 </View>
               </View>
             ) : (
-              <View style={styles.vodBar} pointerEvents="box-none">
-                <View style={styles.timeRow} pointerEvents="none">
-                  <Text style={styles.timeText}>{formatTime(currentTime)}</Text>
-                  <Text style={styles.timeText}>{formatTime(duration)}</Text>
-                </View>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 16, marginBottom: 24, paddingHorizontal: 20 }} pointerEvents="box-none">
+                <Text style={styles.timeText}>{formatTime(currentTime)}</Text>
 
                 {/* Seek bar - has its own PanResponder, must NOT be box-none */}
                 <View
-                  style={styles.seekBarContainer}
+                  style={[styles.seekBarContainer, { flex: 1, marginTop: 0 }]}
                   onLayout={(e) => { seekBarWidth.current = e.nativeEvent.layout.width; }}
                   {...seekBarPan.panHandlers}
                 >
                   <View style={styles.seekBarTrack} pointerEvents="none">
-                    <View style={[styles.seekBarFill, { width: `${progress * 100}%` }]} />
+                    <View style={[styles.seekBarFill, { width: `${progress * 100}%`, backgroundColor: colors.gold }]} />
                   </View>
                   <View
                     style={[
@@ -980,14 +1026,159 @@ export default function PlayerScreen() {
                       {
                         left: `${progress * 100}%`,
                         transform: [{ translateX: -8 }],
+                        backgroundColor: colors.gold,
+                        shadowColor: colors.gold,
                       },
                     ]}
                     pointerEvents="none"
                   />
                 </View>
+
+                <Text style={styles.timeText}>{formatTime(duration)}</Text>
               </View>
             )}
+
+            {/* Bottom Actions Row: Play Controls & Indicators */}
+            <View style={{ flexDirection: isSmallScreen ? 'column' : 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, gap: isSmallScreen ? 16 : 0, paddingBottom: isSmallScreen ? 16 : 0 }} pointerEvents="box-none">
+              
+              {/* Spacer on the left to balance the indicators on the right so center is perfectly centered */}
+              {!isSmallScreen && <View style={{ flex: 1 }} pointerEvents="none" />}
+
+              <View style={{ flexDirection: 'row', gap: isSmallScreen ? 16 : 24, alignItems: 'center', justifyContent: 'center', width: isSmallScreen ? '100%' : undefined }} pointerEvents="box-none">
+                <TVFocusable 
+                  style={({ focused }: any) => [
+                    styles.iconBtn, 
+                    !hasPrev && { opacity: 0.3 },
+                    focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderWidth: 3, borderColor: '#FFF' }
+                  ]}
+                  onPress={handlePrevChannel}
+                  disabled={!hasPrev}
+                >
+                  {({ focused }: any) => (
+                    <Lineicons icon={PreviousStep2Bulk} size={20} color={focused ? "#0A0A0A" : "#FFF"} />
+                  )}
+                </TVFocusable>
+
+                {!isLive && (
+                  <TVFocusable 
+                    style={({ focused }: any) => [
+                      styles.iconBtn,
+                      focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderWidth: 3, borderColor: '#FFF' }
+                    ]} 
+                    onPress={() => handleSeekBy(-10)}
+                  >
+                    {({ focused }: any) => (
+                      <Lineicons icon={ShiftLeftBulk} size={20} color={focused ? "#0A0A0A" : "#FFF"} />
+                    )}
+                  </TVFocusable>
+                )}
+
+                <TVFocusable 
+                  style={({ focused }: any) => [
+                    styles.playBtn,
+                    isSmallScreen && { width: 56, height: 56, borderRadius: 28 },
+                    focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderWidth: 3, borderColor: '#FFF', shadowColor: colors.gold, shadowOpacity: 0.8, shadowRadius: 10 }
+                  ]} 
+                  onPress={togglePlay}
+                  focusable={true}
+                  hasTVPreferredFocus={true}
+                >
+                  {({ focused }: any) => (
+                    <Lineicons icon={isPlaying  ? PauseBulk : PlayBulk} size={isSmallScreen ? 24 : 32} color={focused ? "#0A0A0A" : "#FFF"} />
+                  )}
+                </TVFocusable>
+
+                {!isLive && (
+                  <TVFocusable 
+                    style={({ focused }: any) => [
+                      styles.iconBtn,
+                      focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderWidth: 3, borderColor: '#FFF' }
+                    ]} 
+                    onPress={() => handleSeekBy(10)}
+                  >
+                    {({ focused }: any) => (
+                      <Lineicons icon={ShiftRightBulk} size={20} color={focused ? "#0A0A0A" : "#FFF"} />
+                    )}
+                  </TVFocusable>
+                )}
+                
+                <TVFocusable 
+                  style={({ focused }: any) => [
+                    styles.iconBtn, 
+                    !hasNext && { opacity: 0.3 },
+                    focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderWidth: 3, borderColor: '#FFF' }
+                  ]}
+                  onPress={handleNextChannel}
+                  disabled={!hasNext}
+                >
+                  {({ focused }: any) => (
+                    <Lineicons icon={NextStep2Bulk} size={20} color={focused ? "#0A0A0A" : "#FFF"} />
+                  )}
+                </TVFocusable>
+              </View>
+
+              <View style={{ flex: isSmallScreen ? undefined : 1, width: isSmallScreen ? '100%' : undefined, flexDirection: 'row', gap: 16, justifyContent: isSmallScreen ? 'center' : 'flex-end' }} pointerEvents="box-none">
+                <TVFocusable 
+                  style={({ focused }: any) => [
+                    styles.aspectBtn,
+                    focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderColor: '#FFF' }
+                  ]} 
+                  onPress={toggleAspectMode}
+                >
+                  {({ focused }: any) => (
+                    <Text style={[styles.aspectBtnText, focused && { color: '#0A0A0A' }]}>
+                      {aspectMode === 0 ? 'FIT' : aspectMode === 1 ? 'FILL' : aspectMode === 2 ? 'STRETCH' : '4:3'}
+                    </Text>
+                  )}
+                </TVFocusable>
+                
+                <TVFocusable 
+                  style={({ focused }: any) => [
+                    styles.iconBtn,
+                    focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderWidth: 3, borderColor: '#FFF' }
+                  ]} 
+                  onPress={toggleSubtitles}
+                >
+                  {({ focused }: any) => (
+                    <Lineicons icon={Message2Bulk} size={20} color={focused ? "#0A0A0A" : "#FFF"} />
+                  )}
+                </TVFocusable>
+
+                <TVFocusable 
+                  style={({ focused }: any) => [
+                    styles.iconBtn,
+                    focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderWidth: 3, borderColor: '#FFF' }
+                  ]} 
+                  onPress={handleToggleFavorite}
+                >
+                  {({ focused }: any) => (
+                    <Lineicons icon={HeartBulk} size={20} color={focused ? "#0A0A0A" : (isFavorite ? '#E53935' : '#FFF')} fill={isFavorite ? '#E53935' : 'transparent'} />
+                  )}
+                </TVFocusable>
+              </View>
+
+            </View>
           </View>
+          
+          {/* Volume Slider on Right Edge */}
+          {Math.min(W, H) >= 600 && (
+            <View 
+              style={{ 
+                position: 'absolute', right: 30, top: '50%', transform: [{ translateY: -100 }],
+                width: 44, height: 200, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 22,
+                alignItems: 'center', paddingVertical: 16, justifyContent: 'flex-end',
+                borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)'
+              }}
+              {...volumePan.panHandlers}
+            >
+              <View style={{ width: 6, height: 120, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 3 }}>
+                 <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: `${volume * 100}%`, backgroundColor: colors.gold, borderRadius: 3 }} />
+              </View>
+              <View style={{ marginTop: 16 }} pointerEvents="none">
+                <Lineicons icon={volume === 0 ? VolumeMuteBulk : volume > 0.5 ? VolumeHighBulk : VolumeLowBulk} size={20} color="#FFF" />
+              </View>
+            </View>
+          )}
         </Animated.View>
       )}
 
@@ -1008,8 +1199,8 @@ export default function PlayerScreen() {
             <Lineicons icon={Ban2Bulk} size={20} color="#FFF" />
           </View>
           <View style={styles.errorToastTextBlock}>
-            <Text style={styles.errorToastTitle}>Connection Issue</Text>
-            <Text style={styles.errorToastSub}>Reconnecting...</Text>
+            <Text style={styles.errorToastTitle}>{t('connection_issue')}</Text>
+            <Text style={styles.errorToastSub}>{t('reconnecting')}</Text>
           </View>
         </Animated.View>
       )}
@@ -1017,11 +1208,11 @@ export default function PlayerScreen() {
       {/* ── Layer 6: Resume Prompt Overlay ── */}
       {promptVisible && (
         <View style={styles.promptOverlay} pointerEvents="auto">
-           <Text style={styles.promptTitle}>Resume playback?</Text>
+           <Text style={styles.promptTitle}>{t('resume_playback')}</Text>
            <Text style={styles.promptSub}>You previously stopped at {formatTime(matchedWatched?.progress || 0)}</Text>
            <View style={styles.promptButtons}>
              <TVFocusable 
-               style={({ focused }: any) => [styles.promptBtn, focused && styles.promptBtnFocused]}
+               style={({ focused }: any) => [styles.promptBtn, focused && [styles.promptBtnFocused, { backgroundColor: colors.gold, borderColor: '#FFF' }]]}
                onPress={handleResume}
                hasTVPreferredFocus={true}
                focusable={true}
@@ -1034,7 +1225,7 @@ export default function PlayerScreen() {
              </TVFocusable>
 
              <TVFocusable 
-               style={({ focused }: any) => [styles.promptBtn, focused && styles.promptBtnFocused]}
+               style={({ focused }: any) => [styles.promptBtn, focused && [styles.promptBtnFocused, { backgroundColor: colors.gold, borderColor: '#FFF' }]]}
                onPress={handleStartOver}
                focusable={true}
              >
@@ -1047,6 +1238,145 @@ export default function PlayerScreen() {
            </View>
         </View>
       )}
+      {/* ── Layer 7: Tracks Selection Modal ── */}
+      {showTracksModal && (() => {
+        let modalAudioTracks = Platform.OS === 'web' 
+          ? audioTracks.map((t: any) => ({ ...t, title: t.title || t.language || 'Track' }))
+          : (player?.availableAudioTracks || []).map((t: any, i: number) => ({ id: t.id ?? `native_audio_${i}`, title: t.label || t.language || 'Track', language: t.language, _native: t }));
+        modalAudioTracks = modalAudioTracks.filter((t: any, index: number, self: any[]) => 
+          index === self.findIndex((x) => (x.title === t.title && x.language === t.language))
+        );
+          
+        let modalSubtitleTracks = Platform.OS === 'web'
+          ? subtitleTracks.map((t: any) => ({ ...t, title: t.title || t.language || 'Subtitle' }))
+          : (player?.availableSubtitleTracks || []).map((t: any, i: number) => ({ id: t.id ?? `native_sub_${i}`, title: t.label || t.language || 'Subtitle', language: t.language, _native: t }));
+        modalSubtitleTracks = modalSubtitleTracks.filter((t: any, index: number, self: any[]) => 
+          index === self.findIndex((x) => (x.title === t.title && x.language === t.language))
+        );
+
+        const activeAudioId = Platform.OS === 'web' ? selectedAudio : (player?.audioTrack ? (player.audioTrack.id || player.audioTrack.language || player.audioTrack.label) : null);
+        const activeSubtitleId = Platform.OS === 'web' ? selectedSubtitle : (player?.subtitleTrack ? (player.subtitleTrack.id || player.subtitleTrack.language || player.subtitleTrack.label) : null);
+
+        return (
+        <View style={styles.modalOverlay} pointerEvents="auto">
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>{t('audio_and_subtitles') || 'Audio & Subtitles'}</Text>
+            
+            <View style={styles.tracksContainer}>
+              <View style={styles.trackColumn}>
+                <Text style={styles.trackColTitle}>{t('audio_tracks') || 'Audio Tracks'}</Text>
+                <ScrollView style={{ maxHeight: 300 }}>
+                  {modalAudioTracks.length === 0 && (
+                    <Text style={{ color: 'rgba(255,255,255,0.4)', textAlign: 'center', marginTop: 20 }}>No tracks found</Text>
+                  )}
+                  {modalAudioTracks.map((track: any) => {
+                    const isSelected = Platform.OS === 'web' ? selectedAudio === track.id : (activeAudioId === track.id || (player?.audioTrack === track._native));
+                    return (
+                      <TVFocusable
+                        key={`audio-${track.id}`}
+                        style={({ focused }: any) => [styles.trackBtn, isSelected && styles.trackBtnActive, focused && { borderColor: '#FFF' }]}
+                        onPress={() => {
+                          if (Platform.OS === 'web') {
+                            setSelectedAudio(track.id);
+                          } else if (player && track._native) {
+                            player.audioTrack = track._native;
+                          }
+                          setShowTracksModal(false);
+                        }}
+                        hasTVPreferredFocus={isSelected || (!activeAudioId && modalAudioTracks.indexOf(track) === 0)}
+                      >
+                        <Text style={[styles.trackBtnText, isSelected && styles.trackBtnTextActive]}>
+                          {track.title}
+                        </Text>
+                      </TVFocusable>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+
+              <View style={styles.trackColumn}>
+                <Text style={styles.trackColTitle}>{t('subtitles') || 'Subtitles'}</Text>
+                <ScrollView style={{ maxHeight: 300 }}>
+                  <TVFocusable
+                    style={({ focused }: any) => [styles.trackBtn, !activeSubtitleId && styles.trackBtnActive, focused && { borderColor: '#FFF' }]}
+                    onPress={() => {
+                       if (Platform.OS === 'web') {
+                         setSelectedSubtitle(null);
+                       } else if (player) {
+                         player.subtitleTrack = null;
+                       }
+                       setShowTracksModal(false);
+                    }}
+                  >
+                    <Text style={[styles.trackBtnText, !activeSubtitleId && styles.trackBtnTextActive]}>
+                      Off
+                    </Text>
+                  </TVFocusable>
+                  {modalSubtitleTracks.map((track: any) => {
+                    const isSelected = Platform.OS === 'web' ? selectedSubtitle === track.id : (activeSubtitleId === track.id || (player?.subtitleTrack === track._native));
+                    return (
+                      <TVFocusable
+                        key={`sub-${track.id}`}
+                        style={({ focused }: any) => [styles.trackBtn, isSelected && styles.trackBtnActive, focused && { borderColor: '#FFF' }]}
+                        onPress={() => {
+                          if (Platform.OS === 'web') {
+                            setSelectedSubtitle(track.id);
+                          } else if (player && track._native) {
+                            player.subtitleTrack = track._native;
+                          }
+                          setShowTracksModal(false);
+                        }}
+                        hasTVPreferredFocus={isSelected}
+                      >
+                        <Text style={[styles.trackBtnText, isSelected && styles.trackBtnTextActive]}>
+                          {track.title}
+                        </Text>
+                      </TVFocusable>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+            </View>
+            
+            <TVFocusable
+              style={({ focused }: any) => [styles.retryBtn, { marginTop: 24, alignSelf: 'center' }, focused && { borderColor: '#FFF', borderWidth: 2 }]}
+              onPress={() => setShowTracksModal(false)}
+            >
+              <Text style={styles.retryText}>{t('close') || 'Close'}</Text>
+            </TVFocusable>
+          </View>
+        </View>
+        );
+      })()}
+
+      {/* ── Layer 8: Subtitles Overlay (Top-most level so it's always visible over video/tap areas) ── */}
+      {currentSubtitle ? (
+        <View style={{
+          position: 'absolute',
+          bottom: '12%',
+          left: 0,
+          right: 0,
+          alignItems: 'center',
+          pointerEvents: 'none',
+          zIndex: 99999
+        }}>
+          <Text style={{
+            color: 'white',
+            backgroundColor: 'rgba(0,0,0,0.6)',
+            paddingHorizontal: 16,
+            paddingVertical: 6,
+            borderRadius: 6,
+            fontSize: 26,
+            textAlign: 'center',
+            textShadowColor: 'black',
+            textShadowOffset: { width: 1, height: 1 },
+            textShadowRadius: 3,
+            fontWeight: '600'
+          }}>
+            {currentSubtitle}
+          </Text>
+        </View>
+      ) : null}
 
     </View>
   );
@@ -1284,6 +1614,66 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
     marginTop: 16,
+  },
+  modalOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 200,
+  },
+  modalContent: {
+    backgroundColor: '#111',
+    borderRadius: 16,
+    padding: 24,
+    width: 600,
+    maxHeight: '80%',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  modalTitle: {
+    color: '#FFF',
+    fontSize: 22,
+    fontWeight: 'bold',
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+  tracksContainer: {
+    flexDirection: 'row',
+    gap: 32,
+  },
+  trackColumn: {
+    flex: 1,
+  },
+  trackColTitle: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 14,
+    fontWeight: 'bold',
+    marginBottom: 12,
+    textAlign: 'center',
+    textTransform: 'uppercase',
+  },
+  trackBtn: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    marginBottom: 8,
+    borderWidth: 2,
+    borderColor: 'transparent',
+  },
+  trackBtnActive: {
+    backgroundColor: 'rgba(212,168,67,0.15)',
+    borderColor: '#D4A843',
+  },
+  trackBtnText: {
+    color: '#FFF',
+    fontSize: 14,
+    textAlign: 'center',
+  },
+  trackBtnTextActive: {
+    color: '#D4A843',
+    fontWeight: 'bold',
   },
 });
 

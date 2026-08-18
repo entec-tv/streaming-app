@@ -8,6 +8,7 @@ import { useColors } from '@/hooks/useColors';
 import { Lineicons } from '@lineiconshq/react-native-lineicons';
 import { PlayBulk, MenuMeatballs1Bulk, QuestionMarkCircleBulk, PlusBulk } from '@lineiconshq/free-icons';
 import { useAppStore } from '@/store/app-store';
+import { useTranslation } from '@/hooks/useTranslation';
 
 interface HeroCarouselProps {
   items: FeaturedHero[];
@@ -17,6 +18,7 @@ interface HeroCarouselProps {
 
 export function HeroCarousel({ items, onPlay, onInfo }: HeroCarouselProps) {
   const colors = useColors();
+  const { t, isRTL } = useTranslation();
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
   const carouselHeight = isLandscape ? height * 0.8 : height * 0.7;
@@ -125,7 +127,7 @@ export function HeroCarousel({ items, onPlay, onInfo }: HeroCarouselProps) {
                     {({ focused }: any) => (
                       <>
                         <Lineicons icon={PlayBulk} size={20} color="#1A1A1A" style={{ marginLeft: 4 }} />
-                        <Text style={styles.playButtonText}>Watch Now</Text>
+                        <Text style={styles.playButtonText}>{t('watch_now')}</Text>
                       </>
                     )}
                   </TVFocusable>
@@ -189,7 +191,7 @@ export function HeroCarousel({ items, onPlay, onInfo }: HeroCarouselProps) {
                   <View style={styles.actionSheetIconWrapper}>
                     <Lineicons icon={PlayBulk} size={20} color="#FFF" />
                   </View>
-                  <Text style={styles.actionSheetBtnText}>Watch Now</Text>
+                  <Text style={styles.actionSheetBtnText}>{t('watch_now')}</Text>
                 </TVFocusable>
 
                 <TVFocusable borderThickness={3}
@@ -199,7 +201,7 @@ export function HeroCarousel({ items, onPlay, onInfo }: HeroCarouselProps) {
                   <View style={styles.actionSheetIconWrapper}>
                     <Lineicons icon={favorites.includes(selectedItemForActionSheet.id) ? QuestionMarkCircleBulk : PlusBulk} size={20} color="#FFF" />
                   </View>
-                  <Text style={styles.actionSheetBtnText}>My List</Text>
+                  <Text style={styles.actionSheetBtnText}>{t('my_list')}</Text>
                 </TVFocusable>
 
                 {/* <TVFocusable borderThickness={3}

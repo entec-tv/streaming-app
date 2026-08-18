@@ -7,12 +7,16 @@ export interface Channel {
   streamUrl: string;
   current: string;
   next: string;
-  quality: '4K' | 'FHD' | 'HD';
+  quality: '4K' | 'FHD' | 'HD' | 'SD';
   isLive: boolean;
   type: 'live' | 'vod' | 'series';
   hasArchive?: boolean;
   archiveDuration?: number;
-  num?: number | string;
+  num?: string | number;
+  title?: string;
+  poster?: string;
+  backdrop?: string;
+  description?: string;
 }
 
 export interface Playlist {
@@ -39,7 +43,7 @@ export interface Movie {
   rating: number;
   year: number;
   duration: string;
-  quality: '4K' | 'FHD' | 'HD';
+  quality: '4K' | 'FHD' | 'HD' | 'SD';
   genres: string[];
   description: string;
   streamUrl: string;

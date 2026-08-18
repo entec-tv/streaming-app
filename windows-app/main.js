@@ -5,6 +5,12 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const os = require('os');
+const cp = require('child_process');
+let ffmpeg = require('ffmpeg-static');
+if (ffmpeg.includes('app.asar')) ffmpeg = ffmpeg.replace('app.asar', 'app.asar.unpacked');
+
+let ffprobe = require('@ffprobe-installer/ffprobe').path;
+if (ffprobe.includes('app.asar')) ffprobe = ffprobe.replace('app.asar', 'app.asar.unpacked');
 
 // ==========================================
 // GOOGLE SPEECH-TO-TEXT API KEYS
@@ -15,13 +21,16 @@ const os = require('os');
 // process.env.GOOGLE_DEFAULT_CLIENT_SECRET = 'YOUR_CLIENT_SECRET';
 // ==========================================
 
-const httpAgent = new http.Agent({ maxSockets: 100 });
-const httpsAgent = new https.Agent({ maxSockets: 100, rejectUnauthorized: false });
+const httpAgent = new http.Agent({ maxSockets: 100, keepAlive: true });
+const httpsAgent = new https.Agent({ maxSockets: 100, rejectUnauthorized: false, keepAlive: true });
 
 app.commandLine.appendSwitch('ignore-certificate-errors', 'true');
-app.commandLine.appendSwitch('enable-features', 'PlatformHEVCDecoderSupport,ClearKeyCdm,Widevine');
+app.commandLine.appendSwitch('enable-features', 'PlatformHEVCDecoderSupport,ClearKeyCdm,Widevine,WebAudio');
 app.commandLine.appendSwitch('enable-spatial-navigation');
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+app.commandLine.appendSwitch('disable-features', 'AutoplayIgnoreWebAudio');
+app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
+app.commandLine.appendSwitch('enable-precise-memory-info');
 
 app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
   event.preventDefault();
@@ -47,6 +56,7 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       webSecurity: false,
+      autoplayPolicy: 'no-user-gesture-required',
     },
   });
 
@@ -56,7 +66,7 @@ function createWindow() {
   mainWindow.loadURL(isDev ? 'http://localhost:8081' : `http://localhost:${serverPort}`);
 
   mainWindow.once('ready-to-show', async () => {
-    await mainWindow.webContents.session.clearCache();
+    mainWindow.webContents.setAudioMuted(false);
     mainWindow.setFullScreen(true);
     mainWindow.show();
   });
@@ -88,6 +98,12 @@ function createWindow() {
       callback(false);
     }
   });
+
+  // Spoof User-Agent to match VLC so IPTV providers don't block direct connections
+  mainWindow.webContents.session.webRequest.onBeforeSendHeaders((details, callback) => {
+    details.requestHeaders['User-Agent'] = 'VLC/3.0.16 LibVLC/3.0.16';
+    callback({ cancel: false, requestHeaders: details.requestHeaders });
+  });
 }
 
 function startServer() {
@@ -95,6 +111,9 @@ function startServer() {
     const expressApp = express();
 
     expressApp.use((req, res, next) => {
+      if (req.url !== '/is_maximized') {
+        console.log(`[SERVER GET]: ${req.url}`);
+      }
       res.set({
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
@@ -149,6 +168,7 @@ function startServer() {
     });
 
     expressApp.use(express.json({ limit: '200mb' }));
+    expressApp.use(express.static(path.join(__dirname, 'app')));
 
     const appDataPath = path.join(app.getPath('userData'), 'AppCache');
     if (!fs.existsSync(appDataPath)) fs.mkdirSync(appDataPath, { recursive: true });
@@ -214,17 +234,269 @@ function startServer() {
       res.status(204).end();
     });
 
+    expressApp.options('/proxy-vod', (req, res) => {
+      res.set({
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+        'Access-Control-Allow-Headers': 'Origin, X-Requested-With, Content-Type, Accept, Range',
+        'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges, Content-Type'
+      });
+      res.status(204).end();
+    });
+
+    const codecCache = new Map(); // url -> codec
+
+    expressApp.get('/probe-vod', (req, res) => {
+      const targetUrl = req.query.url;
+      if (!targetUrl) return res.status(400).send('Missing url');
+
+      if (codecCache.has(targetUrl)) {
+         const cached = codecCache.get(targetUrl);
+         return res.json({ duration: cached.duration || 0, codec: cached.codec || 'h264', cached: true });
+      }
+
+      res.set({
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'application/json'
+      });
+
+      const probeProcess = cp.spawn(ffmpeg, ['-i', targetUrl, '-t', '0']);
+      let stderrData = '';
+      probeProcess.stderr.on('data', (data) => {
+        stderrData += data.toString();
+      });
+      
+      const timeout = setTimeout(() => {
+        probeProcess.kill();
+        if (!res.headersSent) res.json({ duration: 0, codec: 'unknown' });
+      }, 10000);
+
+      probeProcess.on('close', () => {
+        clearTimeout(timeout);
+        let duration = 0;
+        let codec = 'unknown';
+
+        const durMatch = stderrData.match(/Duration: (\d+):(\d+):(\d+\.\d+)/);
+        if (durMatch) {
+           duration = parseInt(durMatch[1]) * 3600 + parseInt(durMatch[2]) * 60 + parseFloat(durMatch[3]);
+        }
+
+        const codecMatch = stderrData.match(/Stream #\d+:\d+(?:\[0x[0-9a-f]+\])?(?:\([a-z]+\))?: Video: ([a-zA-Z0-9_-]+)/);
+        if (codecMatch && codecMatch[1]) {
+           codec = codecMatch[1].toLowerCase();
+        }
+
+        codecCache.set(targetUrl, { codec, duration });
+        if (!res.headersSent) res.json({ duration, codec });
+      });
+      probeProcess.on('error', () => {
+        clearTimeout(timeout);
+        if (!res.headersSent) res.json({ duration: 0, codec: 'unknown' });
+      });
+    });
+
+    expressApp.options('/proxy-live', (req, res) => {
+      res.set({
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+        'Access-Control-Allow-Headers': 'Origin, X-Requested-With, Content-Type, Accept, Range',
+        'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges, Content-Type'
+      });
+      res.status(204).end();
+    });
+
+    expressApp.get('/probe-tracks', (req, res) => {
+      const targetUrl = req.query.url;
+      if (!targetUrl) return res.status(400).send('Missing url');
+
+      const internalProxyUrl = `http://127.0.0.1:${serverPort}/proxy?url=${encodeURIComponent(targetUrl)}`;
+
+      const args = [
+        '-v', 'quiet',
+        '-print_format', 'json',
+        '-show_streams',
+        internalProxyUrl
+      ];
+
+      cp.execFile(ffprobe, args, { maxBuffer: 1024 * 1024 * 10 }, (err, stdout, stderr) => {
+        if (err) {
+          console.error('[PROBE] ffprobe error:', err.message);
+          return res.status(500).json({ error: 'Failed to probe tracks' });
+        }
+        try {
+          const info = JSON.parse(stdout);
+          const audioTracks = [];
+          const subtitleTracks = [];
+
+          info.streams?.forEach(stream => {
+            if (stream.codec_type === 'audio') {
+              const lang = stream.tags?.language;
+              const defaultTitle = lang ? `Audio (${lang.toUpperCase()})` : `Audio ${stream.index}`;
+              audioTracks.push({
+                id: stream.index,
+                language: lang || 'Unknown',
+                title: stream.tags?.title || defaultTitle
+              });
+            } else if (stream.codec_type === 'subtitle') {
+              const lang = stream.tags?.language;
+              const defaultTitle = lang ? `Subtitle (${lang.toUpperCase()})` : `Subtitle ${stream.index}`;
+              subtitleTracks.push({
+                id: stream.index,
+                language: lang || 'Unknown',
+                title: stream.tags?.title || defaultTitle
+              });
+            }
+          });
+          res.json({ audioTracks, subtitleTracks });
+        } catch (e) {
+          res.status(500).json({ error: 'Failed to parse ffprobe output' });
+        }
+      });
+    });
+
+    expressApp.get('/proxy-sub', (req, res) => {
+      const targetUrl = req.query.url;
+      const trackId = req.query.track;
+      console.log(`[PROXY-SUB] Requested subtitle track ${trackId} for ${targetUrl}`);
+      if (!targetUrl || !trackId) return res.status(400).send('Missing params');
+
+      const internalProxyUrl = `http://127.0.0.1:${serverPort}/proxy?url=${encodeURIComponent(targetUrl)}`;
+
+      res.set({
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'text/vtt'
+      });
+
+      const ffmpegArgs = [
+        '-i', internalProxyUrl,
+        '-map', `0:${trackId}`,
+        '-f', 'webvtt',
+        'pipe:1'
+      ];
+
+      const ffmpegProcess = cp.spawn(ffmpeg, ffmpegArgs);
+      ffmpegProcess.stdout.pipe(res);
+      ffmpegProcess.stderr.on('data', d => console.log('[PROXY-SUB FFMPEG]:', d.toString()));
+      
+      req.on('close', () => {
+        ffmpegProcess.kill('SIGKILL');
+      });
+    });
+
+    expressApp.get('/proxy-live', (req, res) => {
+      const targetUrl = req.query.url;
+      if (!targetUrl) return res.status(400).send('Missing url');
+
+      res.set({
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'video/x-matroska',
+        'Transfer-Encoding': 'chunked'
+      });
+
+      const ffmpegArgs = [
+        '-reconnect', '1',
+        '-reconnect_streamed', '1',
+        '-reconnect_delay_max', '5',
+        '-i', targetUrl,
+        '-c', 'copy',
+        '-f', 'matroska',
+        'pipe:1'
+      ];
+
+      const ffmpegProcess = cp.spawn(ffmpeg, ffmpegArgs);
+      ffmpegProcess.stdout.pipe(res);
+
+      req.on('close', () => {
+        ffmpegProcess.kill('SIGKILL');
+      });
+
+      ffmpegProcess.on('error', (err) => {
+        if (!res.headersSent) res.status(500).send('Transcoding Error');
+      });
+    });
+
+
+
+    expressApp.get('/proxy-vod', (req, res) => {
+      const targetUrl = req.query.url;
+      const startTime = req.query.t;
+      const clientCodec = req.query.codec;
+      const audioTrack = req.query.audioTrack;
+      if (!targetUrl) return res.status(400).send('Missing url');
+
+      const forceTranscode = req.query.transcode === '1';
+      let cached = codecCache.get(targetUrl);
+      let codec = clientCodec || (cached ? cached.codec : null) || 'h264';
+      
+      const isHevc = codec === 'hevc' || codec === 'h265';
+      const isMkv = targetUrl.toLowerCase().includes('.mkv');
+      const unknownCodec = codec === 'unknown' || codec === 'h264';
+      
+      console.log(`[PROXY-VOD] Streaming VOD: ${targetUrl} starting at ${startTime || 0}s, codec: ${codec}`);
+
+      res.set({
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'video/mp4',
+        'Transfer-Encoding': 'chunked'
+      });
+
+      const ffmpegArgs = [
+        '-reconnect', '1',
+        '-reconnect_streamed', '1',
+        '-reconnect_delay_max', '5'
+      ];
+
+      if (startTime) {
+        ffmpegArgs.push('-ss', startTime.toString());
+      }
+
+      const internalProxyUrl = `http://127.0.0.1:${serverPort}/proxy?url=${encodeURIComponent(targetUrl)}`;
+      ffmpegArgs.push('-i', internalProxyUrl);
+      
+      if (audioTrack) {
+        ffmpegArgs.push('-map', '0:v:0', '-map', `0:${audioTrack}`);
+      }
+
+
+      if (isHevc || forceTranscode || (isMkv && unknownCodec)) {
+         ffmpegArgs.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23');
+      } else {
+         ffmpegArgs.push('-c:v', 'copy');
+      }
+
+      ffmpegArgs.push(
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-f', 'mp4',
+        '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+        '-frag_duration', '500000',
+        'pipe:1'
+      );
+
+      const ffmpegProcess = cp.spawn(ffmpeg, ffmpegArgs);
+
+      ffmpegProcess.stdout.pipe(res);
+
+      ffmpegProcess.stderr.on('data', (data) => {
+        console.log(`[ffmpeg]: ${data.toString()}`);
+      });
+
+      req.on('close', () => {
+        console.log(`[PROXY-VOD] Client disconnected, killing ffmpeg`);
+        ffmpegProcess.kill('SIGKILL');
+      });
+
+      ffmpegProcess.on('error', (err) => {
+        console.error(`[PROXY-VOD] FFmpeg error: ${err.message}`);
+        if (!res.headersSent) res.status(500).send('Transcoding Error');
+      });
+    });
+
     expressApp.all('/proxy*', async (req, res) => {
       let initialTargetUrl = req.query.url;
       if (!initialTargetUrl) return res.status(400).send('Missing url');
 
-      // Convert live .ts streams to .m3u8 so Xtream returns HLS manifests
-      // that hls.js can parse, instead of raw MPEG-TS data
-      const liveTs = /\/live\/[^/]+\/[^/]+\/(\d+)\.ts$/i;
-      if (liveTs.test(initialTargetUrl)) {
-        initialTargetUrl = initialTargetUrl.replace(/\.ts$/i, '.m3u8');
-        console.log(`[PROXY] Converted live .ts to .m3u8: ${initialTargetUrl}`);
-      }
+      // Removed forced conversion of live .ts to .m3u8 to allow raw MPEG-TS streaming.
 
       const isOriginalPlaylist = initialTargetUrl.includes('.m3u8') || initialTargetUrl.includes('.m3u');
       const streamKey = isOriginalPlaylist ? initialTargetUrl : null;
@@ -277,21 +549,27 @@ function startServer() {
               redirectUrl = new URL(redirectUrl, targetUrl).href;
             }
 
-            console.log(`[PROXY REDIRECT] Translating redirect for client to: ${redirectUrl}`);
-            if (!res.headersSent) {
-              const corsHeaders = {
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'GET, OPTIONS',
-                'Access-Control-Allow-Headers': 'Origin, X-Requested-With, Content-Type, Accept, Range',
-                'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges, Content-Type'
-              };
-              const newHeaders = { ...corsHeaders };
-              newHeaders['Location'] = `/proxy?url=${encodeURIComponent(redirectUrl)}`;
-              res.writeHead(proxyRes.statusCode, newHeaders);
-              res.end();
+            if (redirectsLeft > 0) {
+              console.log(`[PROXY REDIRECT] Following internal redirect to: ${redirectUrl}`);
+              proxyRes.on('data', () => {}); // drain
+              return makeRequest(redirectUrl, redirectsLeft - 1);
+            } else {
+              console.log(`[PROXY REDIRECT] Too many redirects, passing to client: ${redirectUrl}`);
+              if (!res.headersSent) {
+                const corsHeaders = {
+                  'Access-Control-Allow-Origin': '*',
+                  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+                  'Access-Control-Allow-Headers': 'Origin, X-Requested-With, Content-Type, Accept, Range',
+                  'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges, Content-Type'
+                };
+                const newHeaders = { ...corsHeaders };
+                newHeaders['Location'] = `/proxy?url=${encodeURIComponent(redirectUrl)}`;
+                res.writeHead(proxyRes.statusCode, newHeaders);
+                res.end();
+              }
+              proxyRes.on('data', () => {}); // drain
+              return;
             }
-            proxyRes.on('data', () => {}); // drain
-            return;
           }
 
           const contentType = (proxyRes.headers['content-type'] || '').toLowerCase();
@@ -599,6 +877,50 @@ function startServer() {
       } else {
         res.json({ isMaximized: false });
       }
+    });
+
+    expressApp.get('/open_network_settings', (req, res) => {
+      if (process.platform === 'win32') {
+        cp.exec('start ms-settings:network-wifi', (err) => {
+          if (err) console.error('Failed to open network settings:', err);
+        });
+      } else if (process.platform === 'darwin') {
+        cp.exec('open x-apple.systempreferences:com.apple.preference.network', (err) => {
+          if (err) console.error('Failed to open network settings:', err);
+        });
+      } else {
+        cp.exec('nm-connection-editor', (err) => {
+          if (err) console.error('Failed to open network settings:', err);
+        });
+      }
+      res.json({ success: true });
+    });
+
+    expressApp.get('/open_settings', (req, res) => {
+      if (process.platform === 'win32') {
+        cp.exec('start ms-settings:', (err) => {
+          if (err) console.error('Failed to open settings:', err);
+        });
+      } else if (process.platform === 'darwin') {
+        cp.exec('open x-apple.systempreferences:', (err) => {
+          if (err) console.error('Failed to open settings:', err);
+        });
+      } else {
+        cp.exec('gnome-control-center', (err) => {
+          if (err) console.error('Failed to open settings:', err);
+        });
+      }
+      res.json({ success: true });
+    });
+
+    expressApp.get('/set_auto_boot', (req, res) => {
+      const enabled = req.query.enabled === 'true';
+      console.log(`[SERVER]: Setting auto-boot to ${enabled}`);
+      app.setLoginItemSettings({
+        openAtLogin: enabled,
+        path: app.getPath('exe'),
+      });
+      res.json({ success: true });
     });
 
     expressApp.get('*', (req, res) => {

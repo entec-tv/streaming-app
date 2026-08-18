@@ -3,6 +3,11 @@ body {
   color: white;
 }
 
+:root {
+  --theme-gold: rgba(212, 168, 67, 1);
+  --theme-gold-dim: rgba(212, 168, 67, 0.5);
+}
+
 /* Custom Scrollbar for EN TEC Theme */
 ::-webkit-scrollbar {
   width: 8px;
@@ -15,18 +20,16 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(212, 168, 67, 0.5);
-  /* Gold with opacity */
+  background: var(--theme-gold-dim);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(212, 168, 67, 0.8);
-  /* Solid gold on hover */
+  background: var(--theme-gold);
 }
 
 /* For Firefox */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(212, 168, 67, 0.5) rgba(0, 0, 0, 0.2);
+  scrollbar-color: var(--theme-gold-dim) rgba(0, 0, 0, 0.2);
 }

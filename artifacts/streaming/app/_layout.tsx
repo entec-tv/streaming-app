@@ -92,6 +92,7 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
   const isLoggedIn = useAppStore((s) => s.isLoggedIn);
   const playlists = useAppStore((s) => s.playlists);
   const initializeFromStorage = useAppStore((s) => s.initializeFromStorage);
+  const checkAuthStatus = useAppStore((s) => s.checkAuthStatus);
   const [isReady, setIsReady] = useState(false);
   const segments = useSegments();
   const router = useRouter();
@@ -102,8 +103,20 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
+    if (isLoggedIn) {
+      // Check auth status immediately on login/mount
+      checkAuthStatus();
+      
+      const interval = setInterval(() => {
+        checkAuthStatus();
+      }, 300000); // 5 minutes
+      return () => clearInterval(interval);
+    }
+  }, [isLoggedIn]);
+
+  useEffect(() => {
     if (!isReady) return;
-    const inAuthGroup = segments[0] === "login";
+    const inAuthGroup = segments[0] === "activation";
     const inPlaylists = segments[0] === "playlists";
 
     const realPlaylists = playlists.filter(p => !p.isDemo);
@@ -112,7 +125,7 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
     let targetPath: string | null = null;
 
     if (!isLoggedIn && !inAuthGroup) {
-      targetPath = "/login";
+      targetPath = "/activation";
     } else if (isLoggedIn) {
       if (!hasPlaylists && !inPlaylists) {
         targetPath = "/playlists";
@@ -141,7 +154,7 @@ function RootLayoutNav() {
     <ThemeProvider value={DarkTheme}>
       <AuthGuard>
         <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: 'transparent' } }}>
-          <Stack.Screen name="login" options={{ headerShown: false }} />
+          <Stack.Screen name="activation" options={{ headerShown: false }} />
           <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
           <Stack.Screen
             name="player"

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, Platform, Pressable } from 'react-native';
-import { MinusBulk } from '@lineiconshq/free-icons';
+
 import { Ionicons } from '@expo/vector-icons';
 import { useColors } from '@/hooks/useColors';
 import { useAppStore } from '@/store/app-store';
@@ -32,18 +32,24 @@ export function DesktopTitleBar() {
         <Pressable 
           style={({hovered}: any) => [styles.btn, hovered && styles.hoverBtn]}
           onPress={() => handleAction('minimize')}
+          focusable={false}
+          {...({ tabIndex: -1 } as any)}
         >
           <Ionicons name="remove" size={18} color="#FFF" />
         </Pressable>
         <Pressable 
           style={({hovered}: any) => [styles.btn, hovered && styles.hoverBtn]}
           onPress={() => handleAction('maximize')}
+          focusable={false}
+          {...({ tabIndex: -1 } as any)}
         >
           <Ionicons name="square-outline" size={14} color="#FFF" />
         </Pressable>
         <Pressable 
           style={({hovered}: any) => [styles.btn, hovered && styles.closeHoverBtn]}
           onPress={() => handleAction('close')}
+          focusable={false}
+          {...({ tabIndex: -1 } as any)}
         >
           <Ionicons name="close" size={18} color="#FFF" />
         </Pressable>

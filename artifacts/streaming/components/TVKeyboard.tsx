@@ -1,9 +1,10 @@
+import { Ionicons } from "@expo/vector-icons";
 import React, { useState, useMemo } from 'react';
 import { View, Text, StyleSheet, ScrollView } from 'react-native';
 import { TVFocusable } from './TVFocusable';
 import { useColors } from '@/hooks/useColors';
-import { Lineicons } from '@lineiconshq/react-native-lineicons';
-import { ArrowLeftBulk, Search1Bulk, XmarkBulk, Microphone1Bulk } from '@lineiconshq/free-icons';
+
+
 import { useVoiceSearch } from '@/hooks/useVoiceSearch';
 
 interface TVKeyboardProps {
@@ -179,7 +180,7 @@ export function TVKeyboard({ value, onChangeText, onSubmit, suggestions = [], on
             >
               {({ focused }: any) => (
                 <View style={styles.actionInner}>
-                  <Lineicons icon={Microphone1Bulk} size={20} color={isListening ? '#FFF' : (focused ? '#000' : colors.text)} />
+                  <Ionicons name="mic-outline" size={20} color={isListening ? '#FFF' : (focused ? '#000' : colors.text)} />
                 </View>
               )}
             </TVFocusable>
@@ -208,7 +209,7 @@ export function TVKeyboard({ value, onChangeText, onSubmit, suggestions = [], on
           >
             {({ focused }: any) => (
               <View style={styles.actionInner}>
-                <Lineicons icon={ArrowLeftBulk} size={20} color={focused ? '#FFF' : colors.text} />
+                <Ionicons name="chevron-back" size={20} color={focused ? '#FFF' : colors.text} />
               </View>
             )}
           </TVFocusable>
@@ -223,7 +224,7 @@ export function TVKeyboard({ value, onChangeText, onSubmit, suggestions = [], on
           >
             {({ focused }: any) => (
               <View style={styles.actionInner}>
-                <Lineicons icon={XmarkBulk} size={20} color={focused ? '#FFF' : colors.text} />
+                <Ionicons name="close" size={20} color={focused ? '#FFF' : colors.text} />
               </View>
             )}
           </TVFocusable>
@@ -238,7 +239,7 @@ export function TVKeyboard({ value, onChangeText, onSubmit, suggestions = [], on
           >
             {({ focused }: any) => (
               <View style={styles.actionInner}>
-                <Lineicons icon={Search1Bulk} size={20} color={focused ? '#000' : colors.text} />
+                <Ionicons name="search" size={20} color={focused ? '#000' : colors.text} />
               </View>
             )}
           </TVFocusable>

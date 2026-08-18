@@ -11,6 +11,8 @@ import { TVFocusable } from '@/components/TVFocusable';
 import { Platform, StyleSheet, View, Text, useWindowDimensions } from "react-native";
 import { LinearGradient } from 'expo-linear-gradient';
 import { useColors } from "@/hooks/useColors";
+import { useTranslation } from "@/hooks/useTranslation";
+import { usePathname } from "expo-router";
 import { TVSidebar } from "@/components/TVSidebar";
 import { GlobalHeader } from "@/components/GlobalHeader";
 import { useAppStore } from "@/store/app-store";
@@ -26,10 +28,12 @@ function ClassicTabLayout() {
   const isLandscape = width > height;
   const subscriptionExpired = useAppStore((s) => s.subscriptionExpired);
   const isFullscreen = useAppStore((s) => s.isFullscreen);
+  const { isRTL } = useTranslation();
+  const pathname = usePathname();
 
   return (
     <View style={styles.layoutContainer}>
-      {isLargeScreen && (
+      {(isLargeScreen && pathname !== '/') && (
         <LinearGradient
           colors={['rgba(5,7,10,1)', 'rgba(5,7,10,1)', 'rgba(5,7,10,1)', 'rgba(28,49,89,0.35)']}
           locations={[0, 0.45, 0.55, 1]}
@@ -39,7 +43,7 @@ function ClassicTabLayout() {
         />
       )}
       {(!subscriptionExpired && !isFullscreen) && <TVSidebar />}
-      <View style={[styles.contentContainer, (isLargeScreen && !subscriptionExpired && !isFullscreen) && { paddingLeft: 80 }]}>
+      <View style={[styles.contentContainer, (isLargeScreen && !subscriptionExpired && !isFullscreen) && (isRTL ? { paddingRight: 80 } : { paddingLeft: 80 })]}>
         <Tabs
           screenOptions={{
             sceneStyle: { backgroundColor: 'transparent' },
@@ -175,6 +179,13 @@ function ClassicTabLayout() {
         options={{
           href: null,
           title: "Favorites",
+        }}
+      />
+      <Tabs.Screen
+        name="profile"
+        options={{
+          href: null,
+          title: "Profile",
         }}
       />
       <Tabs.Screen

@@ -1,6 +1,7 @@
 import React from 'react';
-import { Pressable, Text, StyleSheet, Animated } from 'react-native';
+import { Text, StyleSheet } from 'react-native';
 import { useColors } from '@/hooks/useColors';
+import { TVFocusable } from './TVFocusable';
 
 interface CategoryPillProps {
   label: string;
@@ -10,40 +11,31 @@ interface CategoryPillProps {
 
 export function CategoryPill({ label, isActive, onPress }: CategoryPillProps) {
   const colors = useColors();
-  const scale = React.useRef(new Animated.Value(1)).current;
-
-  const onPressIn = () => {
-    Animated.spring(scale, { toValue: 0.94, useNativeDriver: true, speed: 30 }).start();
-  };
-  const onPressOut = () => {
-    Animated.spring(scale, { toValue: 1, useNativeDriver: true, speed: 20 }).start();
-  };
 
   return (
-    <Animated.View style={{ transform: [{ scale }] }}>
-      <Pressable
-        onPress={onPress}
-        onPressIn={onPressIn}
-        onPressOut={onPressOut}
-        style={[
-          styles.container,
-          {
-            backgroundColor: isActive ? colors.gold : colors.surface,
-            borderColor: isActive ? colors.gold : colors.border,
-          }
-        ]}
-      >
+    <TVFocusable
+      onPress={onPress}
+      disableBorder={true}
+      style={{ marginRight: 8 }}
+    >
+      {({ focused, pressed }: { focused: boolean; pressed: boolean }) => (
         <Text
           style={[
             styles.label,
-            { color: isActive ? colors.accentForeground : colors.mutedForeground }
+            styles.container,
+            {
+              backgroundColor: isActive ? colors.gold : colors.surface,
+              borderColor: focused || pressed ? colors.gold : (isActive ? colors.gold : colors.border),
+              borderWidth: focused || pressed ? 2 : 1,
+              color: isActive ? colors.accentForeground : colors.mutedForeground,
+            }
           ]}
           numberOfLines={1}
         >
           {label}
         </Text>
-      </Pressable>
-    </Animated.View>
+      )}
+    </TVFocusable>
   );
 }
 

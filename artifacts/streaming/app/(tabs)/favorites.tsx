@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { View, Text, StyleSheet, FlatList, useWindowDimensions, Platform } from 'react-native';
 import { TVFocusable } from '@/components/TVFocusable';
 import { useColors } from '@/hooks/useColors';
+import { useTranslation } from '@/hooks/useTranslation';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Lineicons } from '@lineiconshq/react-native-lineicons';
 import { HeartBulk, MonitorBulk, Trash3Bulk } from '@lineiconshq/free-icons';
@@ -13,6 +14,7 @@ import { useIsFocused } from '@react-navigation/native';
 export default function FavoritesScreen() {
   const isFocused = useIsFocused();
   const colors = useColors();
+  const { t } = useTranslation();
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { width, height } = useWindowDimensions();
@@ -97,33 +99,35 @@ export default function FavoritesScreen() {
   };
 
   return (
-    <View style={[styles.container, { backgroundColor: isLargeScreen ? 'transparent' : colors.background, opacity: isFocused ? 1 : 0, pointerEvents: isFocused ? 'auto' : 'none' }]}>
+    <View style={[styles.container, { backgroundColor: 'transparent', paddingLeft: isLargeScreen ? 32 : 0 , display: Platform.OS === 'web' && !isFocused ? 'none' : 'flex' }]}>
       <View style={[styles.header, { paddingTop: insets.top + 20, paddingHorizontal: isLargeScreen ? 40 : 20 }]}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
           <View style={[styles.iconBox, { backgroundColor: colors.surface }]}>
             <Lineicons icon={HeartBulk} size={24} color={colors.gold} />
           </View>
-          <Text style={[styles.headerTitle, { color: colors.text }]}>Favorites</Text>
+          <Text style={[styles.headerTitle, { color: colors.text }]}>{t('favorites')}</Text>
         </View>
       </View>
 
-      {favoriteItems.length === 0 ? (
-        <View style={styles.emptyContainer}>
-          <Lineicons icon={HeartBulk} size={64} color={colors.border} />
-          <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>
-            You haven't added any favorites yet.
-          </Text>
-        </View>
-      ) : (
-        <FlatList
-          data={favoriteItems}
-          keyExtractor={(item, index) => item.id || String(index)}
-          numColumns={numColumns}
-          renderItem={renderItem}
-          key={numColumns}
-          contentContainerStyle={{ padding: isLargeScreen ? 40 : 20, paddingBottom: insets.bottom + 80 }}
-        />
-      )}
+      <View nativeID="favorites-list" style={{ flex: 1 }}>
+        {favoriteItems.length === 0 ? (
+          <View style={styles.emptyContainer}>
+            <Lineicons icon={HeartBulk} size={64} color={colors.border} />
+            <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>
+              {t('no_favorites')}
+            </Text>
+          </View>
+        ) : (
+          <FlatList
+            data={favoriteItems}
+            keyExtractor={(item, index) => item.id || String(index)}
+            numColumns={numColumns}
+            renderItem={renderItem}
+            key={numColumns}
+            contentContainerStyle={{ padding: isLargeScreen ? 40 : 20, paddingBottom: insets.bottom + 80 }}
+          />
+        )}
+      </View>
     </View>
   );
 }

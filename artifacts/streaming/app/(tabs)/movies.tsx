@@ -1,30 +1,55 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { View, Text, StyleSheet, FlatList, Pressable, ActivityIndicator, useWindowDimensions, Platform, ScrollView, TextInput } from 'react-native';
+import { View, Text, StyleSheet, FlatList, ActivityIndicator, useWindowDimensions, Platform, ScrollView, TextInput } from 'react-native';
 import { TVFocusable } from '@/components/TVFocusable';
 import { MarqueeText } from '@/components/MarqueeText';
 import { useColors } from '@/hooks/useColors';
+import { useTranslation } from '@/hooks/useTranslation';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Lineicons } from '@lineiconshq/react-native-lineicons';
-import { Search1Bulk, MonitorBulk, DashboardSquare1Bulk, Folder1Bulk, ArrowRightBulk } from '@lineiconshq/free-icons';
+import { Search1Bulk, MonitorBulk, DashboardSquare1Bulk, Folder1Bulk, ArrowRightBulk, HeartBulk } from '@lineiconshq/free-icons';
 import { MovieCard } from '@/components/MovieCard';
 import { router, useNavigation, useLocalSearchParams, useRouter } from 'expo-router';
 import { useAppStore } from '@/store/app-store';
 import { Channel, Movie } from '@/types';
 import { SearchKeyboardModal } from '@/components/SearchKeyboardModal';
+import { PinModal } from '@/components/PinModal';
 import { Ionicons } from '@expo/vector-icons';
 import { useIsFocused } from '@react-navigation/native';
+
+
 
 export default function MoviesScreen() {
   const isFocused = useIsFocused();
   const colors = useColors();
+  const { t } = useTranslation();
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
   const router = useRouter();
   const { width, height } = useWindowDimensions();
-  const isLandscape = width > height;
-  const isLargeScreen = width >= 1024 || Platform.isTV;
-  const numColumns = isLargeScreen ? 4 : 3;
-  const mobileNumColumns = Math.max(2, Math.floor((width - 40) / 130));
+  const rawIsLandscape = width > height;
+  const rawIsLargeScreen = width >= 1024 || Platform.isTV;
+  const rawNumColumns = rawIsLargeScreen ? 4 : 3;
+  const rawMobileNumColumns = Math.max(2, Math.floor((width - 40) / 130));
+
+  const [layoutState, setLayoutState] = useState({
+    isLandscape: rawIsLandscape,
+    isLargeScreen: rawIsLargeScreen,
+    numColumns: rawNumColumns,
+    mobileNumColumns: rawMobileNumColumns
+  });
+
+  useEffect(() => {
+    if (isFocused) {
+      setLayoutState({
+        isLandscape: rawIsLandscape,
+        isLargeScreen: rawIsLargeScreen,
+        numColumns: rawNumColumns,
+        mobileNumColumns: rawMobileNumColumns
+      });
+    }
+  }, [isFocused, rawIsLandscape, rawIsLargeScreen, rawNumColumns, rawMobileNumColumns]);
+
+  const { isLandscape, isLargeScreen, numColumns, mobileNumColumns } = layoutState;
 
   const activePlaylistId = useAppStore((s) => s.activePlaylistId);
   const activeCategories = useAppStore((s) => s.activeCategories);
@@ -37,13 +62,49 @@ export default function MoviesScreen() {
   const [loading, setLoading] = useState(false);
   const hasDefaulted = useRef(false);
   const flatListRef = useRef<FlatList>(null);
+  const categoryListRef = useRef<FlatList>(null);
+
+  const isParentalLocked = useAppStore((s) => s.isParentalLocked);
+  const unlockCategory = useAppStore((s) => s.unlockCategory);
+  const parentalPin = useAppStore((s) => s.parentalPin);
+
+  const [pinModalVisible, setPinModalVisible] = useState(false);
+  const [pendingCategory, setPendingCategory] = useState<any>(null);
 
   const [categorySearch, setCategorySearch] = useState('');
   const [movieSearch, setMovieSearch] = useState('');
+  const categoryPreferences = useAppStore((s) => s.categoryPreferences);
+  const updateCategoryPreferences = useAppStore((s) => s.updateCategoryPreferences);
+  const defaultPrefs = useMemo(() => ({ hiddenIds: [], liveOrder: [], vodOrder: [], seriesOrder: [] }), []);
+  const prefs = categoryPreferences[activePlaylistId] || defaultPrefs;
+
+  const finalVodCats = useMemo(() => {
+    if (!activeCategories?.vod) return [];
+    
+    let filtered = activeCategories.vod.filter((c: any) => !prefs.hiddenIds.includes(c.id));
+    
+    if (prefs.vodOrder && prefs.vodOrder.length > 0) {
+      const orderMap = new Map<string, number>(prefs.vodOrder.map((id, index) => [id, index]));
+      filtered.sort((a: any, b: any) => {
+        const idxA = orderMap.has(a.id) ? orderMap.get(a.id)! : 999999;
+        const idxB = orderMap.has(b.id) ? orderMap.get(b.id)! : 999999;
+        return idxA - idxB;
+      });
+    }
+    return filtered;
+  }, [activeCategories?.vod, prefs]);
+
   const [showCategoryKeyboard, setShowCategoryKeyboard] = useState(false);
   const [showMovieKeyboard, setShowMovieKeyboard] = useState(false);
 
-  const categories = useMemo(() => activeCategories?.vod || [], [activeCategories]);
+  const categories = useMemo(() => {
+    const SPECIAL_CATEGORIES = [
+      { id: '__all__', name: t('all') || 'All' },
+      { id: '__recent__', name: t('continue_watching') || 'Continue Watching' },
+      { id: '__favorites__', name: t('favorites') || 'Favorites' }
+    ];
+    return [...SPECIAL_CATEGORIES, ...finalVodCats];
+  }, [finalVodCats, t]);
 
   const filteredCategories = useMemo(() => {
     if (!categorySearch.trim()) return categories;
@@ -57,13 +118,64 @@ export default function MoviesScreen() {
     return localMovies.filter(m => m.title.toLowerCase().includes(q));
   }, [localMovies, movieSearch]);
 
+  const moveCategory = (direction: 'up' | 'down') => {
+    if (!selectedCategory || selectedCategory.id.startsWith('__')) return;
+    
+    let currentList = activeCategories?.vod?.filter((c: any) => !prefs.hiddenIds.includes(c.id)) || [];
+    if (prefs.vodOrder && prefs.vodOrder.length > 0) {
+      const orderMap = new Map<string, number>(prefs.vodOrder.map((id, index) => [id, index]));
+      currentList.sort((a: any, b: any) => {
+        const idxA = orderMap.has(a.id) ? orderMap.get(a.id)! : 999999;
+        const idxB = orderMap.has(b.id) ? orderMap.get(b.id)! : 999999;
+        return idxA - idxB;
+      });
+    }
+
+    const index = currentList.findIndex((c: any) => c.id === selectedCategory.id);
+    if (index === -1) return;
+    
+    if (direction === 'up' && index === 0) return;
+    if (direction === 'down' && index === currentList.length - 1) return;
+    
+    const swapIndex = direction === 'up' ? index - 1 : index + 1;
+    const temp = currentList[index];
+    currentList[index] = currentList[swapIndex];
+    currentList[swapIndex] = temp;
+
+    const newOrder = currentList.map((c: any) => c.id);
+    updateCategoryPreferences(activePlaylistId, { vodOrder: newOrder });
+  };
+
   const loadCategory = useCallback(async (cat: { id: string; name: string }) => {
     if (!activePlaylistId) return;
-    setDisplayCount(50);
+    setDisplayCount(20);
     setLoading(true);
 
     try {
-      const result = await getChannelsForCategory(activePlaylistId, 'vod', cat.id, cat.name);
+      let result: Channel[] = [];
+      const store = useAppStore.getState();
+
+      if (cat.id === '__all__') {
+        const vodCats = store.activeCategories?.vod || [];
+        if (vodCats.length > 0) {
+          const randomCats = [...vodCats].sort(() => 0.5 - Math.random()).slice(0, 5);
+          const chunks = await Promise.all(
+            randomCats.map(c => getChannelsForCategory(activePlaylistId, 'vod', c.id, c.name).catch(() => []))
+          );
+          result = chunks.flat().sort(() => 0.5 - Math.random());
+        }
+      } else if (cat.id === '__recent__') {
+        result = store.continueWatching
+          .filter((i) => i.type === 'vod' && i.progress > 0)
+          .map((i) => ({ ...i, category: i.category || 'VOD' } as unknown as Channel));
+      } else if (cat.id === '__favorites__') {
+        result = store.favoriteItems
+          .filter((i) => i.type === 'vod')
+          .map((i) => ({ ...i, category: i.category || 'VOD' } as unknown as Channel));
+      } else {
+        result = await getChannelsForCategory(activePlaylistId, 'vod', cat.id, cat.name);
+      }
+
       const mapped = result.map((c: Channel) => ({
         id: c.id,
         title: c.name,
@@ -123,7 +235,8 @@ export default function MoviesScreen() {
 
       if (categories.length > 0) {
         if (!selectedCategory) {
-          setSelectedCategory(categories[0]);
+          const firstValid = categories.find(c => !isParentalLocked(c.name)) || categories[0];
+          setSelectedCategory(firstValid);
         }
         hasDefaulted.current = true;
       } else {
@@ -183,68 +296,130 @@ export default function MoviesScreen() {
           {/* Pane 1: Categories */}
           <View style={[styles.tvPaneCategories, { borderRightWidth: 1, borderRightColor: 'rgba(255,255,255,0.08)' }]}>
             <View style={styles.tvHeader}>
-              <Text style={[styles.tvTitle, { color: colors.text }]}>Movies</Text>
+              <Text style={[styles.tvTitle, { color: colors.text }]}>{t('movies')}</Text>
               <View style={[styles.searchBox, { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.1)' }]}>
                 <Ionicons name="search" size={14} color={colors.mutedForeground} />
                 {isLargeScreen ? (
                   <TVFocusable onPress={() => setShowCategoryKeyboard(true)} style={{ flex: 1, paddingVertical: 4 }}>
                     <Text style={[styles.searchInput, { color: categorySearch ? colors.text : colors.mutedForeground, marginTop: 4 }]}>
-                      {categorySearch || "Search categories..."}
+                      {categorySearch || t('search_categories')}
                     </Text>
                   </TVFocusable>
                 ) : (
                   <TextInput
                     style={[styles.searchInput, { color: colors.text }]}
-                    placeholder="Search categories..."
+                    placeholder={t('search_categories')}
                     placeholderTextColor={colors.mutedForeground}
                     value={categorySearch}
                     onChangeText={setCategorySearch}
                   />
                 )}
                 {categorySearch ? (
-                  <Pressable onPress={() => setCategorySearch('')}>
-                    <Ionicons name="close-circle" size={14} color={colors.mutedForeground} />
-                  </Pressable>
+                  <TVFocusable onPress={() => setCategorySearch('')} disableBorder={true}>
+                    <Ionicons name="close-circle" size={16} color={colors.mutedForeground} style={{ padding: 4 }} />
+                  </TVFocusable>
                 ) : null}
               </View>
             </View>
-            <ScrollView style={{ flex: 1 }}>
-              {filteredCategories.map((item) => {
+            <FlatList
+              ref={categoryListRef}
+              style={{ flex: 1 }}
+              data={filteredCategories}
+              keyExtractor={(item) => item.id}
+              showsVerticalScrollIndicator={false}
+              renderItem={({ item, index }) => {
                 const isSelected = selectedCategory?.id === item.id;
+                const isSpecial = item.id.startsWith('__');
                 return (
-                  <TVFocusable
-                    key={item.id}
-                    onPress={() => setSelectedCategory(item)}
-                    style={({ focused }: any) => [
+                  <View 
+                    style={[
                       styles.tvCategoryItem,
-                      isSelected && { backgroundColor: 'rgba(212,168,67,0.15)', borderLeftWidth: 3, borderLeftColor: colors.gold },
-                      focused && { backgroundColor: colors.gold, transform: [{ scale: 1.02 }] }
+                      { padding: 0, paddingHorizontal: 0, paddingVertical: 0, flexDirection: 'row', alignItems: 'stretch' },
+                      isSelected && { backgroundColor: 'rgba(212,168,67,0.15)', borderLeftWidth: 3, borderLeftColor: colors.gold }
                     ]}
                   >
-                    {({ focused }: any) => (
-                      <MarqueeText 
-                        text={item.name}
-                        isFocused={focused || isSelected}
-                        style={[
-                          styles.tvCategoryText, 
-                          { color: focused ? '#000' : (isSelected ? colors.gold : colors.text), fontWeight: isSelected ? 'bold' : '500' }
-                        ]} 
-                      />
-                    )}
-                  </TVFocusable>
+                    <TVFocusable
+                      hasTVPreferredFocus={isSelected}
+                      onFocus={() => {
+                        categoryListRef.current?.scrollToIndex({
+                          index,
+                          animated: true,
+                          viewPosition: 0.5,
+                        });
+                      }}
+                      onPress={() => {
+                        if (isParentalLocked(item.id)) {
+                          setPendingCategory(item);
+                          setPinModalVisible(true);
+                        } else {
+                          setSelectedCategory(item);
+                        }
+                      }}
+                      style={({ focused }: any) => [
+                        { flex: 1, padding: 12, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', gap: 8, borderRadius: 8 },
+                        focused && { backgroundColor: colors.gold, transform: [{ scale: 1.02 }] }
+                      ]}
+                    >
+                      {({ focused }: any) => (
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 }}>
+                          {item.id === '__favorites__' && (
+                            <Lineicons icon={HeartBulk} size={16} color={focused ? '#000' : (isSelected ? colors.gold : colors.text)} />
+                          )}
+                          {item.id === '__recent__' && (
+                            <Ionicons name="time" size={16} color={focused ? '#000' : (isSelected ? colors.gold : colors.text)} />
+                          )}
+                          <MarqueeText 
+                            text={`${item.name}${item.count !== undefined ? ` (${item.count})` : ''}`}
+                            isFocused={focused || isSelected}
+                            style={[
+                              styles.tvCategoryText, 
+                              { color: focused ? '#000' : (isSelected ? colors.gold : colors.text), fontWeight: isSelected || isSpecial ? 'bold' : '500' }
+                            ]} 
+                          />
+                        </View>
+                      )}
+                    </TVFocusable>
+                  </View>
                 );
-              })}
-            </ScrollView>
+              }}
+            />
           </View>
 
           {/* Pane 2: Movies */}
-          <View style={[styles.tvPaneContent, { flex: 1 }]}>
+          <View nativeID="tour-movies-grid" {...({ id: 'tour-movies-grid' } as any)} style={[styles.tvPaneContent, { flex: 1 }]}>
             <View style={[styles.tvHeader, { paddingBottom: 16 }]}>
               <Text style={[styles.tvTitle, { color: colors.text }]}>
                 {selectedCategory ? selectedCategory.name : 'Select a Category'}
               </Text>
               {selectedCategory && (
                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  {selectedCategory && !selectedCategory.id.startsWith('__') && !movieSearch && (
+                    <>
+                      <TVFocusable
+                        onPress={() => moveCategory('up')}
+                        style={({ focused }: any) => [
+                          styles.tvFavoriteBtn,
+                          { backgroundColor: focused ? colors.gold : 'rgba(255,255,255,0.05)', borderColor: colors.border, marginTop: 0, paddingHorizontal: 16, marginRight: 8 }
+                        ]}
+                      >
+                        {({ focused }: any) => (
+                          <Ionicons name="chevron-up" size={22} color={focused ? '#000' : colors.text} />
+                        )}
+                      </TVFocusable>
+
+                      <TVFocusable
+                        onPress={() => moveCategory('down')}
+                        style={({ focused }: any) => [
+                          styles.tvFavoriteBtn,
+                          { backgroundColor: focused ? colors.gold : 'rgba(255,255,255,0.05)', borderColor: colors.border, marginTop: 0, paddingHorizontal: 16, marginRight: 16 }
+                        ]}
+                      >
+                        {({ focused }: any) => (
+                          <Ionicons name="chevron-down" size={22} color={focused ? '#000' : colors.text} />
+                        )}
+                      </TVFocusable>
+                    </>
+                  )}
                   <View style={[styles.searchBox, { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.1)' }]}>
                     <Ionicons name="search" size={14} color={colors.mutedForeground} />
                     {isLargeScreen ? (
@@ -256,16 +431,16 @@ export default function MoviesScreen() {
                     ) : (
                       <TextInput
                         style={[styles.searchInput, { color: colors.text }]}
-                        placeholder="Search movies..."
+                        placeholder={t('search_movies')}
                         placeholderTextColor={colors.mutedForeground}
                         value={movieSearch}
                         onChangeText={setMovieSearch}
                       />
                     )}
                     {movieSearch ? (
-                      <Pressable onPress={() => setMovieSearch('')}>
-                        <Ionicons name="close-circle" size={14} color={colors.mutedForeground} />
-                      </Pressable>
+                      <TVFocusable onPress={() => { setMovieSearch(''); setShowMovieKeyboard(false); }} disableBorder>
+                        <Ionicons name="close-circle" size={18} color={colors.mutedForeground} style={{ padding: 4 }} />
+                      </TVFocusable>
                     ) : null}
                   </View>
                 </View>
@@ -278,12 +453,12 @@ export default function MoviesScreen() {
             ) : !selectedCategory ? (
               <View style={styles.centerAll}>
                 <Lineicons icon={Folder1Bulk} size={48} color={colors.mutedForeground} />
-                <Text style={[styles.emptyTitle, { color: colors.text, marginTop: 12 }]}>Choose a category from the left</Text>
+                <Text style={[styles.emptyTitle, { color: colors.text, marginTop: 12 }]}>{t('choose_category')}</Text>
               </View>
             ) : filteredMovies.length === 0 ? (
               <View style={styles.centerAll}>
                 <Lineicons icon={Search1Bulk} size={48} color={colors.mutedForeground} />
-                <Text style={[styles.emptyTitle, { color: colors.text, marginTop: 12 }]}>No movies found</Text>
+                <Text style={[styles.emptyTitle, { color: colors.text, marginTop: 12 }]}>{t('no_movies')}</Text>
               </View>
             ) : (
               <View style={{ flex: 1, opacity: loading ? 0.5 : 1 }}>
@@ -304,7 +479,7 @@ export default function MoviesScreen() {
                   windowSize={5}
                   key={`movies_grid_${numColumns}`}
                   data={filteredMovies.slice(0, displayCount)}
-                  onEndReached={() => setDisplayCount(prev => prev + 50)}
+                  onEndReached={() => setDisplayCount(prev => prev + 20)}
                   onEndReachedThreshold={0.5}
                 keyExtractor={(item) => item.id}
                 numColumns={numColumns}
@@ -343,14 +518,14 @@ export default function MoviesScreen() {
           value={categorySearch}
           onChangeText={setCategorySearch}
           onClose={() => setShowCategoryKeyboard(false)}
-          placeholder="Search categories..."
+          placeholder={t('search_categories')}
         />
         <SearchKeyboardModal 
           visible={showMovieKeyboard}
           value={movieSearch}
           onChangeText={setMovieSearch}
           onClose={() => setShowMovieKeyboard(false)}
-          placeholder="Search movies..."
+          placeholder={t('search_movies')}
         />
       </View>
     );
@@ -378,7 +553,7 @@ export default function MoviesScreen() {
               {selectedCategory.name}
             </Text>
             <Text style={[styles.count, { color: colors.mutedForeground, fontSize: isLandscape ? 11 : 13 }]}>
-              {localMovies.length.toLocaleString()} movies
+              {localMovies.length.toLocaleString()} {t('count_channels')}
             </Text>
           </View>
         </View>
@@ -392,7 +567,7 @@ export default function MoviesScreen() {
           >
             <Lineicons icon={Search1Bulk} size={16} color={colors.mutedForeground} />
             <Text style={[styles.searchInput, { color: colors.mutedForeground }]}>
-              Search movies, categories...
+              {t('search_movies')}
             </Text>
           </TVFocusable>
         )}
@@ -404,7 +579,7 @@ export default function MoviesScreen() {
         ) : localMovies.length === 0 ? (
           <View style={styles.centerAll}>
             <Lineicons icon={MonitorBulk} size={48} color={colors.mutedForeground} />
-            <Text style={[styles.emptyTitle, { color: colors.text, marginTop: 12 }]}>No movies found</Text>
+            <Text style={[styles.emptyTitle, { color: colors.text, marginTop: 12 }]}>{t('no_movies')}</Text>
           </View>
         ) : (
           <FlatList
@@ -463,7 +638,7 @@ export default function MoviesScreen() {
             style={[styles.floatingViewAllBtn, { backgroundColor: colors.surface, borderColor: colors.gold, bottom: insets.bottom + 90 }]}
           >
             <Lineicons icon={DashboardSquare1Bulk} size={18} color={colors.gold} />
-            <Text style={[styles.floatingViewAllText, { color: colors.text }]}>View All Categories</Text>
+            <Text style={[styles.floatingViewAllText, { color: colors.text }]}>{t('view_all_categories')}</Text>
           </TVFocusable>
         )}
       </View>
@@ -473,9 +648,9 @@ export default function MoviesScreen() {
   return (
     <View style={[styles.container, { backgroundColor: colors.background, paddingTop: insets.top, opacity: isFocused ? 1 : 0, pointerEvents: isFocused ? 'auto' : 'none' }]}>
       <View style={styles.header}>
-        <Text style={[styles.title, { color: colors.text }]}>Movies</Text>
+        <Text style={[styles.title, { color: colors.text }]}>{t('movies')}</Text>
         <Text style={[styles.count, { color: colors.mutedForeground }]}>
-          {categories.length.toLocaleString()} categories
+          {categories.length.toLocaleString()} {t('count_categories')}
         </Text>
       </View>
 
@@ -485,7 +660,7 @@ export default function MoviesScreen() {
       >
         <Lineicons icon={Search1Bulk} size={16} color={colors.mutedForeground} />
         <Text style={[styles.searchInput, { color: colors.mutedForeground }]}>
-          Search movies, categories...
+          {t('search_movies')}
         </Text>
       </TVFocusable>
 
@@ -545,6 +720,17 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     marginTop: 8,
     gap: 8,
+  },
+  tvFavoriteBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    alignSelf: 'flex-start',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    marginTop: 24,
   },
   mobileChannelListContent: {
     borderRadius: 12,

@@ -1,6 +1,8 @@
 import React from 'react';
-import { Text, StyleSheet, Pressable, Animated, View } from 'react-native';
+import { Text, StyleSheet, View } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useColors } from '@/hooks/useColors';
+import { TVFocusable } from './TVFocusable';
 
 interface GoldButtonProps {
   title: string;
@@ -8,53 +10,57 @@ interface GoldButtonProps {
   onPress?: () => void;
   variant?: 'primary' | 'outline';
   style?: any;
+  disabled?: boolean;
 }
 
-export function GoldButton({ title, icon, onPress, variant = 'primary', style }: GoldButtonProps) {
-  const scale = React.useRef(new Animated.Value(1)).current;
-
-  const handlePressIn = () => {
-    Animated.spring(scale, { toValue: 0.96, useNativeDriver: true, speed: 30 }).start();
-  };
-
-  const handlePressOut = () => {
-    Animated.spring(scale, { toValue: 1, useNativeDriver: true, speed: 20 }).start();
-  };
+export function GoldButton({ title, icon, onPress, variant = 'primary', style, disabled }: GoldButtonProps) {
+  const colors = useColors();
 
   if (variant === 'outline') {
     return (
-      <Animated.View style={[{ transform: [{ scale }] }, style]}>
-        <Pressable
-          onPress={onPress}
-          onPressIn={handlePressIn}
-          onPressOut={handlePressOut}
-          style={styles.outlineButton}
-        >
-          {icon && <View style={styles.iconWrap}>{icon}</View>}
-          <Text style={styles.outlineTitle}>{title}</Text>
-        </Pressable>
-      </Animated.View>
+      <TVFocusable
+        onPress={onPress}
+        disabled={disabled}
+        focusedBorderColor="#FFF"
+        style={style}
+        disableBorder={true}
+      >
+        {({ focused }) => (
+          <View style={[
+            styles.outlineButton, 
+            { 
+              borderColor: focused ? '#FFF' : colors.gold, 
+              backgroundColor: colors.goldDim 
+            }
+          ]}>
+            {icon && <View style={styles.iconWrap}>{icon}</View>}
+            <Text style={[styles.outlineTitle, { color: colors.gold }]}>{title}</Text>
+          </View>
+        )}
+      </TVFocusable>
     );
   }
 
   return (
-    <Animated.View style={[{ transform: [{ scale }] }, style]}>
-      <Pressable
-        onPress={onPress}
-        onPressIn={handlePressIn}
-        onPressOut={handlePressOut}
-      >
+    <TVFocusable
+      onPress={onPress}
+      disabled={disabled}
+      focusedBorderColor="#FFF"
+      style={style}
+      disableBorder={true}
+    >
+      {({ focused }) => (
         <LinearGradient
-          colors={['#F8D054', '#F4C542', '#D4A030']}
-          style={styles.gradient}
+          colors={[colors.gold, colors.gold, colors.gold]}
+          style={[styles.gradient, focused && { borderWidth: 2, borderColor: '#FFF' }]}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
         >
           {icon && <View style={styles.iconWrap}>{icon}</View>}
           <Text style={styles.primaryTitle}>{title}</Text>
         </LinearGradient>
-      </Pressable>
-    </Animated.View>
+      )}
+    </TVFocusable>
   );
 }
 
@@ -83,11 +89,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 8,
     borderWidth: 1.5,
-    borderColor: 'rgba(244,197,66,0.5)',
-    backgroundColor: 'rgba(244,197,66,0.08)',
   },
   outlineTitle: {
-    color: '#F4C542',
     fontWeight: '600',
     fontSize: 15,
     letterSpacing: 0.3,

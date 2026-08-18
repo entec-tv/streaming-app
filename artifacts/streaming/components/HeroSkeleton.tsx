@@ -29,15 +29,15 @@ export function HeroSkeleton() {
 
   if (isLargeScreen) {
     return (
-      <View style={{ width: '100%', height: height * 0.75, backgroundColor: colors.background }}>
-        <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: colors.card, opacity }]} />
+      <View style={{ width: '100%', height: height * 0.75, backgroundColor: 'transparent' }}>
+        <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: colors.card, opacity, borderRadius: 16 }]} />
         <LinearGradient
-          colors={['transparent', 'rgba(0,0,0,0.6)', '#000']}
+          colors={['transparent', 'rgba(0,0,0,0.4)', (colors as any).overlay || colors.background]}
           locations={[0, 0.4, 1]}
           style={StyleSheet.absoluteFill}
         />
         <LinearGradient
-          colors={['#000', 'transparent']}
+          colors={[(colors as any).overlay || colors.background, 'transparent']}
           start={{ x: 0, y: 0 }}
           end={{ x: 0.5, y: 0 }}
           style={StyleSheet.absoluteFill}
@@ -57,10 +57,10 @@ export function HeroSkeleton() {
   }
 
   return (
-    <View style={{ width: '100%', height: height * 0.55, backgroundColor: colors.background }}>
-      <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: colors.card, opacity }]} />
+    <View style={{ width: '100%', height: height * 0.55, backgroundColor: 'transparent' }}>
+      <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: colors.card, opacity, borderRadius: 16 }]} />
       <LinearGradient
-        colors={['transparent', 'rgba(0,0,0,0.8)', colors.background]}
+        colors={['transparent', 'rgba(0,0,0,0.4)', (colors as any).overlay || colors.background]}
         locations={[0, 0.5, 1]}
         style={StyleSheet.absoluteFill}
       />

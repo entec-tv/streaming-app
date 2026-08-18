@@ -7,7 +7,7 @@ import { useColors } from '@/hooks/useColors';
 import { LinearGradient } from 'expo-linear-gradient';
 
 function formatDuration(sec: number) {
-  if (sec < 0) return '0:00';
+  if (typeof sec !== 'number' || isNaN(sec) || sec < 0) return '0:00';
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = Math.floor(sec % 60);
@@ -22,18 +22,38 @@ interface ContinueWatchingCardProps {
   width?: number;
 }
 
+import { base64Decode } from '@/lib/base64';
+
+function decodeIfNeeded(str?: string) {
+  if (!str) return '';
+  if (str.startsWith('http') || str.startsWith('data:') || str.startsWith('file:')) return str;
+  try {
+    const decoded = base64Decode(str);
+    if (decoded.startsWith('http')) return decoded;
+    return str;
+  } catch {
+    return str;
+  }
+}
+
 export const ContinueWatchingCard = React.memo(function ContinueWatchingCard({ item, onPress, width = 240 }: ContinueWatchingCardProps) {
   const colors = useColors();
 
-  const percent = item.duration > 0 ? Math.min(100, Math.max(0, (item.progress / item.duration) * 100)) : 0;
+  const isValidDuration = typeof item.duration === 'number' && !isNaN(item.duration) && item.duration > 0;
+  const percent = isValidDuration ? Math.min(100, Math.max(0, (item.progress / item.duration) * 100)) : 0;
 
-  const fallbackUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(item.title || 'Movie')}&background=1A1A1A&color=D4A843&bold=true&size=300&format=svg`;
-  const initialImage = item.backdrop || item.poster || fallbackUrl;
+  const titleFromItem = (item as any).title || (item as any).name;
+  const displayTitle = titleFromItem && titleFromItem.trim() !== '' ? titleFromItem : 'Unknown Title';
+  const fallbackUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(displayTitle)}&background=1A1A1A&color=${colors.gold.replace('#', '')}&bold=true&size=300&format=svg`;
+  
+  const decodedBackdrop = decodeIfNeeded(item.backdrop);
+  const decodedPoster = decodeIfNeeded(item.poster || (item as any).logo || (item as any).thumbnail);
+  const initialImage = decodedBackdrop || decodedPoster || fallbackUrl;
   const [imgSource, setImgSource] = React.useState(initialImage);
 
   React.useEffect(() => {
-    setImgSource(item.backdrop || item.poster || fallbackUrl);
-  }, [item.backdrop, item.poster, fallbackUrl]);
+    setImgSource(decodedBackdrop || decodedPoster || fallbackUrl);
+  }, [decodedBackdrop, decodedPoster, fallbackUrl]);
 
   return (
     <TVFocusable onPress={onPress} style={{ width }} disableBorder={true}>
@@ -52,12 +72,14 @@ export const ContinueWatchingCard = React.memo(function ContinueWatchingCard({ i
           />
           <LinearGradient colors={['transparent', 'rgba(0,0,0,0.9)']} style={styles.gradient}>
             <View style={styles.infoRow}>
-              <Text style={styles.title} numberOfLines={1}>{item.title}</Text>
-              <Text style={styles.time}>{formatDuration(item.duration)}</Text>
+              <Text style={styles.title} numberOfLines={1}>{displayTitle}</Text>
+              {isValidDuration && <Text style={styles.time}>{formatDuration(item.duration)}</Text>}
             </View>
-            <View style={styles.progressContainer}>
-               <View style={[styles.progressBar, { width: `${percent}%`, backgroundColor: colors.gold }]} />
-            </View>
+            {isValidDuration && (
+              <View style={styles.progressContainer}>
+                 <View style={[styles.progressBar, { width: `${percent}%`, backgroundColor: colors.gold }]} />
+              </View>
+            )}
           </LinearGradient>
         </View>
       )}

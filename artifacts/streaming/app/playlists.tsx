@@ -4,7 +4,6 @@ import {
   Text,
   StyleSheet,
   FlatList,
-  Pressable,
   TextInput,
   KeyboardAvoidingView,
   Platform,
@@ -12,9 +11,11 @@ import {
   Alert,
 } from 'react-native';
 import { useColors } from '@/hooks/useColors';
+import { useTranslation } from '@/hooks/useTranslation';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Lineicons } from '@lineiconshq/react-native-lineicons';
 import { ArrowLeftBulk, PlusBulk, CheckCircle1Bulk, RefreshCircle1ClockwiseBulk, Trash3Bulk, XmarkBulk, Shield2Bulk, Tickets3Bulk, User4Bulk, Locked1Bulk, Folder1Bulk, Link2AngularRightBulk, MonitorBulk } from '@lineiconshq/free-icons';
+import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { TVFocusable } from '@/components/TVFocusable';
 import { useAppStore } from '@/store/app-store';
@@ -27,7 +28,8 @@ type AddTab = 'm3u' | 'xtream';
 export default function PlaylistsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { playlists, activePlaylistId, setActivePlaylist, deletePlaylist, addPlaylist, loadPlaylistFromUrl, refreshPlaylist } =
+  const { t } = useTranslation();
+  const { playlists, activePlaylistId, setActivePlaylist, deletePlaylist, addPlaylist, loadPlaylistFromUrl, refreshPlaylist, deviceId, deviceKey } =
     useAppStore();
 
   const [showAdd, setShowAdd] = useState(false);
@@ -136,6 +138,10 @@ export default function PlaylistsScreen() {
   };
 
   const handleDelete = (id: string, name: string) => {
+    if (id.startsWith('admin_sub_')) {
+      Alert.alert(t('not_allowed'), t('cannot_delete_admin_subscription'));
+      return;
+    }
     if (Platform.OS === 'web') {
       if (window.confirm(`Remove "${name}"?`)) {
         deletePlaylist(id);
@@ -153,28 +159,46 @@ export default function PlaylistsScreen() {
   };
 
   return (
-    <View style={[styles.container, { backgroundColor: colors.background, paddingTop: insets.top }]}>
+    <View style={[styles.container, { backgroundColor: 'transparent', paddingTop: insets.top }]}>
       <View style={styles.header}>
         {playlists.length > 0 ? (
           <TVFocusable onPress={() => { if (router.canGoBack()) { router.back(); } else { router.replace('/(tabs)'); } }} style={styles.backBtn}>
-            <Lineicons icon={ArrowLeftBulk} size={24} color={colors.foreground} />
+            <Ionicons name="chevron-back" size={24} color={colors.foreground} />
           </TVFocusable>
         ) : (
           <View style={{ width: 8 }} />
         )}
-        <Text style={[styles.title, { color: colors.text }]}>Playlists</Text>
-        <TVFocusable
-          style={[styles.addBtn, { backgroundColor: colors.gold }]}
-          onPress={() => setShowAdd(true)}
-        >
-          <Lineicons icon={PlusBulk} size={20} color="#1A1A1A" />
-        </TVFocusable>
+        <Text style={[styles.title, { color: colors.text, flex: 1, marginLeft: 12 }]}>{t('playlists')}</Text>
+        
+        <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }}>
+          <TVFocusable
+            style={[styles.addBtn, { backgroundColor: 'transparent', borderWidth: 1, borderColor: colors.gold }]}
+            onPress={() => {
+              useAppStore.getState().setGlobalShowTour(true);
+              router.replace('/(tabs)');
+            }}
+          >
+            <Ionicons name="help-circle-outline" size={20} color={colors.gold} />
+          </TVFocusable>
+        </View>
       </View>
 
       <FlatList
         data={playlists}
         keyExtractor={(item) => item.id}
         contentContainerStyle={[styles.list, { paddingBottom: insets.bottom + 20 }]}
+        ListHeaderComponent={() => (
+          <View style={{ backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 16, padding: 20, marginBottom: 24, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' }}>
+            <View>
+              <Text style={{ color: colors.mutedForeground, fontSize: 13, marginBottom: 6, fontWeight: '600' }}>{t('mac_address')}</Text>
+              <Text style={{ color: colors.text, fontSize: 18, fontWeight: '900', letterSpacing: 1 }} selectable>{deviceId}</Text>
+            </View>
+            <View style={{ alignItems: 'flex-end' }}>
+              <Text style={{ color: colors.gold, fontSize: 13, marginBottom: 6, fontWeight: '600' }}>{t('device_key')}</Text>
+              <Text style={{ color: colors.gold, fontSize: 18, fontWeight: '900', letterSpacing: 1 }} selectable>{deviceKey}</Text>
+            </View>
+          </View>
+        )}
         renderItem={({ item }) => {
           const isActive = item.id === activePlaylistId;
           const isRefreshing = refreshingId === item.id;
@@ -203,12 +227,14 @@ export default function PlaylistsScreen() {
                       <View style={[styles.activeDot, { backgroundColor: colors.gold }]} />
                     )}
                     <Text style={[styles.cardTitle, { color: colors.text }]} numberOfLines={1}>
-                      {item.name}
+                      {item.name === 'admin_subscription' ? t('admin_subscription') : item.name}
                     </Text>
                   </View>
-                  {isActive && (
-                    <Lineicons icon={CheckCircle1Bulk} size={18} color={colors.gold} />
-                  )}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    {isActive && (
+                      <Lineicons icon={CheckCircle1Bulk} size={18} color={colors.gold} />
+                    )}
+                  </View>
                 </View>
 
                 <Text
@@ -268,7 +294,7 @@ export default function PlaylistsScreen() {
             ]}
           >
             <View style={styles.modalHeader}>
-              <Text style={[styles.modalTitle, { color: colors.text }]}>Add Playlist</Text>
+              <Text style={[styles.modalTitle, { color: colors.text }]}>{t('add_playlist')}</Text>
               <TVFocusable onPress={() => !loading && setShowAdd(false)}>
                 <Lineicons icon={XmarkBulk} size={24} color={colors.foreground} />
               </TVFocusable>
@@ -369,22 +395,23 @@ export default function PlaylistsScreen() {
               </View>
             )}
 
-            <LinearGradient
-              colors={['#D4A843', '#A67C2E']}
-              style={[styles.submitBtn, loading && { opacity: 0.6 }]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
+            <View
+              style={[
+                styles.submitBtn,
+                { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.gold },
+                loading && { opacity: 0.6 }
+              ]}
             >
               <TVFocusable
                 style={styles.submitBtnInner}
                 onPress={addTab === 'm3u' ? handleAddM3U : handleAddXtream}
                 disabled={loading}
               >
-                <Text style={styles.submitBtnText}>
+                <Text style={[styles.submitBtnText, { color: colors.gold }]}>
                   {loading ? 'Loading...' : addTab === 'm3u' ? 'Load Playlist' : 'Connect'}
                 </Text>
               </TVFocusable>
-            </LinearGradient>
+            </View>
           </View>
         </KeyboardAvoidingView>
       )}
@@ -410,7 +437,7 @@ function StyledInput({
       onPress={() => inputRef.current?.focus()}
       style={({ focused }: any) => [
         styledInputStyles.container,
-        { backgroundColor: colors.background, borderColor: focused || isFocused ? colors.gold : colors.border },
+        { backgroundColor: 'transparent', borderColor: focused || isFocused ? colors.gold : colors.border },
       ]}
     >
       <Lineicons icon={icon} size={20} color={isFocused ? colors.gold : colors.mutedForeground} style={styledInputStyles.icon} />

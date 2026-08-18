@@ -5,7 +5,6 @@ import {
   Text, 
   StyleSheet, 
   FlatList, 
-  Pressable, 
   ActivityIndicator, 
   Dimensions, 
   Alert,
@@ -13,6 +12,7 @@ import {
   useWindowDimensions
 } from 'react-native';
 import { useColors } from '@/hooks/useColors';
+import { useTranslation } from '@/hooks/useTranslation';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Lineicons } from '@lineiconshq/react-native-lineicons';
 import { MonitorBulk, ArrowRightBulk, ArrowLeftBulk, StopwatchBulk, PlayBulk } from '@lineiconshq/free-icons';
@@ -23,6 +23,11 @@ import { Channel } from '@/types';
 import { useIsFocused } from '@react-navigation/native';
 import { base64Decode } from '@/lib/base64';
 import { MOCK_CHANNELS } from '@/lib/mock-data';
+
+const SPECIAL_CATEGORIES = [
+  { id: '__favorites__', name: 'Favorites' },
+  { id: '__recent__', name: 'Recently Watched' }
+];
 
 interface EpgProgram {
   id: string;
@@ -41,6 +46,7 @@ interface EpgProgram {
 export default function CatchUpScreen() {
   const isFocused = useIsFocused();
   const colors = useColors();
+  const { t } = useTranslation();
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
   const isLargeScreen = width >= 800 || Platform.isTV;
@@ -282,7 +288,7 @@ export default function CatchUpScreen() {
   const handlePlayProgram = (program: EpgProgram) => {
     if (!selectedChannel) return;
     if (program.isFuture) {
-      Alert.alert('Warning', 'Cannot play a future broadcast.');
+      Alert.alert(t('warning'), t('future_broadcast'));
       return;
     }
 
@@ -371,21 +377,21 @@ export default function CatchUpScreen() {
   if (isLargeScreen) {
     const isWeb = Platform.OS === 'web';
     const glassPaneStyle: any = isWeb ? {
-      backgroundColor: 'rgba(0, 0, 0, 0.65)',
+      backgroundColor: colors.glass || (colors.card + 'E6'),
       backdropFilter: 'blur(30px)',
       WebkitBackdropFilter: 'blur(30px)',
       borderRadius: 16,
       borderWidth: 1,
-      borderColor: 'rgba(255,255,255,0.08)',
+      borderColor: colors.border,
       marginTop: 12,
       marginBottom: 32,
       marginRight: 16,
       overflow: 'hidden',
     } : {
-      backgroundColor: 'rgba(0, 0, 0, 0.8)',
+      backgroundColor: colors.glass || (colors.card + 'E6'),
       borderRadius: 16,
       borderWidth: 1,
-      borderColor: 'rgba(255,255,255,0.08)',
+      borderColor: colors.border,
       marginTop: 12,
       marginBottom: 32,
       marginRight: 16,
@@ -393,12 +399,12 @@ export default function CatchUpScreen() {
     };
 
     return (
-      <View style={[styles.tvContainer, { backgroundColor: isLargeScreen ? 'transparent' : colors.background, paddingLeft: 24, opacity: isFocused ? 1 : 0, pointerEvents: isFocused ? 'auto' : 'none' }]}>
+      <View style={[styles.tvContainer, { backgroundColor: 'transparent', paddingLeft: isLargeScreen ? 104 : 24 , display: Platform.OS === 'web' && !isFocused ? 'none' : 'flex' }]}>
         <View style={[{ flexDirection: 'row', flex: 1 }, glassPaneStyle]}>
           {/* Pane 1: Channels */}
-          <View style={[styles.tvPaneChannels, { borderRightWidth: 1, borderRightColor: 'rgba(255,255,255,0.08)' }]}>
+          <View nativeID="tour-catchup-list" {...({ id: 'tour-catchup-list' } as any)} style={[styles.tvPaneChannels, { borderRightWidth: 1, borderRightColor: colors.border }]}>
             <View style={styles.tvHeader}>
-              <Text style={[styles.tvTitle, { color: colors.text }]}>Catch Up</Text>
+              <Text style={[styles.tvTitle, { color: colors.text }]}>{t('catch_up')}</Text>
             </View>
           <FlatList
             data={catchupChannels}
@@ -438,9 +444,9 @@ export default function CatchUpScreen() {
           </View>
 
           {/* Pane 2: Days */}
-          <View style={[styles.tvPaneDays, { borderRightWidth: 1, borderRightColor: 'rgba(255,255,255,0.08)' }]}>
+          <View style={[styles.tvPaneDays, { borderRightWidth: 1, borderRightColor: colors.border }]}>
             <View style={styles.tvHeader}>
-              <Text style={[styles.tvTitle, { color: colors.text }]}>Days</Text>
+              <Text style={[styles.tvTitle, { color: colors.text }]}>{t('days')}</Text>
             </View>
           {days.map((day, idx) => {
             const isSelected = selectedDayIndex === idx;
@@ -456,7 +462,7 @@ export default function CatchUpScreen() {
               >
                 {({ focused }: any) => (
                   <Text style={[styles.tvDayText, { color: focused ? '#000' : (isSelected ? colors.gold : colors.text), fontWeight: isSelected ? 'bold' : '500' }]}>
-                    {idx === 0 ? 'Today' : idx === 1 ? 'Yesterday' : day.label.split(' (')[0]}
+                    {idx === 0 ? t('today') : idx === 1 ? t('yesterday') : day.label.split(' (')[0]}
                   </Text>
                 )}
               </TVFocusable>
@@ -467,7 +473,7 @@ export default function CatchUpScreen() {
           {/* Pane 3: EPG Schedule */}
           <View style={[styles.tvPaneEpg, { flex: 1 }]}>
             <View style={styles.tvHeader}>
-              <Text style={[styles.tvTitle, { color: colors.text }]}>Schedule</Text>
+              <Text style={[styles.tvTitle, { color: colors.text }]}>{t('schedule')}</Text>
             </View>
           {loadingEpg ? (
             <View style={styles.centerAll}>
@@ -493,7 +499,7 @@ export default function CatchUpScreen() {
                     </Text>
                     {item.isCurrent && (
                       <View style={styles.nowPlayingBadge}>
-                        <Text style={styles.nowPlayingText}>LIVE</Text>
+                        <Text style={styles.nowPlayingText}>{t('live')}</Text>
                       </View>
                     )}
                   </View>
@@ -506,7 +512,7 @@ export default function CatchUpScreen() {
                   {!item.isFuture && (
                     <View style={{ marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                        <Lineicons icon={item.isCurrent  ? MonitorBulk : PlayBulk} size={16} color={colors.gold} />
-                       <Text style={{ color: colors.gold, fontWeight: 'bold' }}>{item.isCurrent ? 'Watch Live' : 'Play Catch Up'}</Text>
+                       <Text style={{ color: colors.gold, fontWeight: 'bold' }}>{item.isCurrent ? t('watch_live') : t('play_catch_up')}</Text>
                     </View>
                   )}
                 </TVFocusable>
@@ -546,7 +552,7 @@ export default function CatchUpScreen() {
   };
 
   return (
-    <View style={[styles.container, { backgroundColor: isLargeScreen ? 'transparent' : colors.background, opacity: isFocused ? 1 : 0, pointerEvents: isFocused ? 'auto' : 'none' }]}>
+    <View style={[styles.container, { backgroundColor: 'transparent' , display: Platform.OS === 'web' && !isFocused ? 'none' : 'flex' }]}>
       {selectedChannel && (
         <View style={[styles.header, { paddingBottom: 0 }, isLandscape && { paddingTop: 4, paddingBottom: 4 }]}>
           <TVFocusable 
@@ -570,7 +576,7 @@ export default function CatchUpScreen() {
           ListEmptyComponent={
             <View style={styles.emptyState}>
               <Lineicons icon={StopwatchBulk} size={48} color={colors.mutedForeground} style={{ marginBottom: 16 }} />
-              <Text style={[styles.emptyText, { color: colors.text }]}>No catch-up channels available</Text>
+              <Text style={[styles.emptyText, { color: colors.text }]}>{t('no_catchup')}</Text>
             </View>
           }
         />
@@ -586,7 +592,7 @@ export default function CatchUpScreen() {
                   onPress={() => setSelectedDayIndex(idx)}
                 >
                   <Text style={[styles.dayTabLabel, { color: isSelected ? colors.gold : colors.text }, isLandscape && { fontSize: 12 }]}>
-                    {idx === 0 ? 'Today' : idx === 1 ? 'Yesterday' : day.label.split(' (')[0]}
+                {idx === 0 ? t('today') : idx === 1 ? t('yesterday') : day.label.split(' (')[0]}
                   </Text>
                 </TVFocusable>
               );
@@ -596,7 +602,7 @@ export default function CatchUpScreen() {
           {loadingEpg ? (
             <View style={styles.centerAll}>
               <ActivityIndicator size="large" color={colors.gold} />
-              <Text style={{ color: colors.mutedForeground, marginTop: 12 }}>Syncing EPG Archive...</Text>
+              <Text style={{ color: colors.mutedForeground, marginTop: 12 }}>{t('syncing_epg')}</Text>
             </View>
           ) : (
             <FlatList
@@ -607,7 +613,7 @@ export default function CatchUpScreen() {
                 <View style={[styles.epgCard, { backgroundColor: colors.surface, borderColor: item.isCurrent ? colors.gold : colors.border, opacity: item.isFuture ? 0.55 : 1 }, isLandscape && { padding: 10, gap: 8, marginBottom: 8 }]}>
                   <View style={styles.epgTimeContainer}>
                     <Text style={[styles.epgTime, { color: item.isCurrent ? colors.gold : colors.text }, isLandscape && { fontSize: 12 }]}>{formatTimeRange(item.start, item.end)}</Text>
-                    {item.isCurrent && <View style={[styles.nowPlayingBadge, isLandscape && { paddingVertical: 2 }]}><Text style={styles.nowPlayingText}>LIVE</Text></View>}
+                    {item.isCurrent && <View style={[styles.nowPlayingBadge, isLandscape && { paddingVertical: 2 }]}><Text style={styles.nowPlayingText}>{t('live')}</Text></View>}
                   </View>
                   <View style={[styles.epgInfo, isLandscape && { gap: 2 }]}>
                     <Text style={[styles.epgTitle, { color: colors.text }, isLandscape && { fontSize: 14 }]} numberOfLines={isLandscape ? 1 : 2}>{item.title}</Text>
@@ -616,7 +622,7 @@ export default function CatchUpScreen() {
                   {!item.isFuture && (
                     <TVFocusable style={[styles.playBtn, { backgroundColor: item.isCurrent ? colors.gold : 'rgba(255,255,255,0.08)' }, isLandscape && { paddingVertical: 6 }]} onPress={() => handlePlayProgram(item)}>
                       <Lineicons icon={item.isCurrent  ? MonitorBulk : PlayBulk} size={14} color={item.isCurrent ? '#1A1A1A' : colors.text} />
-                      <Text style={[styles.playBtnText, { color: item.isCurrent ? '#1A1A1A' : colors.text }, isLandscape && { fontSize: 12 }]}>{item.isCurrent ? 'Live' : 'Catch Up'}</Text>
+                      <Text style={[styles.playBtnText, { color: item.isCurrent ? '#1A1A1A' : colors.text }, isLandscape && { fontSize: 12 }]}>{item.isCurrent ? t('live_label') : t('catch_up_label')}</Text>
                     </TVFocusable>
                   )}
                 </View>

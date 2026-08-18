@@ -32,8 +32,23 @@ export const TVFocusable = forwardRef<any, TVFocusableProps>(({
   const [isFocused, setIsFocused] = useState(false);
   const [isPressed, setIsPressed] = useState(false);
   const scaleAnim = useRef(new Animated.Value(1)).current;
+  const domRef = useRef<HTMLElement>(null);
 
   const isTV = Platform.isTV;
+
+  React.useEffect(() => {
+    if (Platform.OS === 'web' && (props.hasTVPreferredFocus || (props as any).autoFocus)) {
+      // Small timeout to allow the element to fully mount and paint
+      const timer = setTimeout(() => {
+        if (domRef.current) {
+          domRef.current.focus({ preventScroll: true });
+        } else if ((ref as any)?.current) {
+          (ref as any).current.focus({ preventScroll: true });
+        }
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [props.hasTVPreferredFocus, (props as any).autoFocus]);
 
   const handleFocus = useCallback((e: any) => {
     setIsFocused(true);
@@ -71,8 +86,13 @@ export const TVFocusable = forwardRef<any, TVFocusableProps>(({
 
   return (
     <AnimatedPressable
-      ref={ref}
+      ref={(node: any) => {
+        (domRef as any).current = node;
+        if (typeof ref === 'function') ref(node);
+        else if (ref) (ref as any).current = node;
+      }}
       {...props}
+      {...(Platform.OS === 'web' && props.focusable !== false ? { tabIndex: 0 } : {})}
       onFocus={handleFocus}
       onBlur={handleBlur}
       onPressIn={handlePressIn}

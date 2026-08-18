@@ -1,9 +1,10 @@
+import { Ionicons } from "@expo/vector-icons";
 import React from 'react';
-import { View, Text, StyleSheet, Platform, Pressable, useWindowDimensions } from 'react-native';
+import { View, Text, StyleSheet, Platform, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors } from '@/hooks/useColors';
-import { Lineicons } from '@lineiconshq/react-native-lineicons';
-import { Search1Bulk, User4Bulk } from '@lineiconshq/free-icons';
+
+
 import { router } from 'expo-router';
 import { TVFocusable } from './TVFocusable';
 
@@ -36,22 +37,24 @@ export function GlobalHeader() {
           onPress={() => router.push('/search')}
           style={({ focused }: any) => [
             styles.iconBtn,
+            { backgroundColor: colors.surface },
             focused && { backgroundColor: colors.gold, transform: [{ scale: 1.1 }] }
           ]}
         >
           {({ focused }: any) => (
-            <Lineicons icon={Search1Bulk} size={22} color={focused ? "#000" : colors.text} />
+            <Ionicons name="search" size={22} color={focused ? "#000" : colors.text} />
           )}
         </TVFocusable>
         <TVFocusable 
           onPress={() => router.push('/settings')}
           style={({ focused }: any) => [
             styles.iconBtn,
+            { backgroundColor: colors.surface },
             focused && { backgroundColor: colors.gold, transform: [{ scale: 1.1 }] }
           ]}
         >
           {({ focused }: any) => (
-            <Lineicons icon={User4Bulk} size={22} color={focused ? "#000" : colors.text} />
+            <Ionicons name="person-circle-outline" size={22} color={focused ? "#000" : colors.text} />
           )}
         </TVFocusable>
       </View>
@@ -82,11 +85,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   iconBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 14,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.3)',
+    borderWidth: 1,
+    borderColor: 'transparent',
+    transitionDuration: '200ms',
   }
 });

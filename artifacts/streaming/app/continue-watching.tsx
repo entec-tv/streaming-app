@@ -1,17 +1,18 @@
+import { Ionicons } from "@expo/vector-icons";
 import React from 'react';
 import {
   View,
   Text,
   StyleSheet,
   FlatList,
-  Pressable,
   Dimensions,
   useWindowDimensions
 } from 'react-native';
 import { useColors } from '@/hooks/useColors';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Lineicons } from '@lineiconshq/react-native-lineicons';
-import { ArrowLeftBulk, PlayBulk } from '@lineiconshq/free-icons';
+import { useTranslation } from '@/hooks/useTranslation';
+
+
 import { router } from 'expo-router';
 import { TVFocusable } from '@/components/TVFocusable';
 import { useAppStore } from '@/store/app-store';
@@ -22,7 +23,13 @@ const { width: SCREEN_WIDTH } = Dimensions.get('window');
 export default function ContinueWatchingScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const continueWatching = useAppStore((s) => s.continueWatching) || [];
+  const { t } = useTranslation();
+  const rawContinueWatching = useAppStore((s) => s.continueWatching) || [];
+  const continueWatching = React.useMemo(() => {
+    return rawContinueWatching.filter(item => 
+      item && item.title && (item.type === 'live' || (item.duration > 0 && !isNaN(item.duration)))
+    );
+  }, [rawContinueWatching]);
   const { width } = useWindowDimensions();
 
   const minCardWidth = 160;
@@ -31,7 +38,7 @@ export default function ContinueWatchingScreen() {
   const cardWidth = (width - 40 - (numColumns - 1) * 20) / numColumns;
 
   return (
-    <View style={[styles.container, { backgroundColor: colors.background }]}>
+    <View style={[styles.container, { backgroundColor: 'transparent' }]}>
       {/* Header */}
       <View style={[styles.header, { paddingTop: insets.top + 20 }]}>
         <TVFocusable
@@ -43,15 +50,15 @@ export default function ContinueWatchingScreen() {
           focusable={true}
         >
           {({ focused }: any) => (
-            <Lineicons icon={ArrowLeftBulk} size={24} color={focused ? colors.gold : colors.text} />
+            <Ionicons name="chevron-back" size={24} color={focused ? colors.gold : colors.text} />
           )}
         </TVFocusable>
-        <Text style={[styles.headerTitle, { color: colors.text }]}>Continue Watching</Text>
+        <Text style={[styles.headerTitle, { color: colors.text }]}>{t('continue_watching')}</Text>
       </View>
 
       {continueWatching.length === 0 ? (
         <View style={styles.emptyContainer}>
-          <Lineicons icon={PlayBulk} size={64} color={colors.text + '40'} />
+          <Ionicons name="play" size={64} color={colors.text + '40'} />
           <Text style={[styles.emptyText, { color: colors.text + '80' }]}>
             No continue watching history
           </Text>

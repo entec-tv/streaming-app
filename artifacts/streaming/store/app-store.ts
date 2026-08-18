@@ -3,6 +3,7 @@ import { Platform } from 'react-native';
 import AsyncStorageOriginal from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+
 import { readCacheString, writeCacheString, deleteCache } from '../lib/storage';
 
 const isLargeDataKey = (key: string) => key.startsWith('channels_') || key.startsWith('categories_') || key.startsWith('search_index_');
@@ -28,15 +29,24 @@ const AsyncStorage = {
 let globalSearchIndex: Channel[] = [];
 const globalChannelsCache = new Map<string, { data: Channel[], timestamp: number }>();
 const CACHE_TTL = 5 * 60 * 1000;
+import Constants from 'expo-constants';
 import { Channel, Playlist } from '../types';
 import { MOCK_PLAYLISTS, MOCK_CHANNELS, MOCK_MOVIES, MOCK_SERIES } from '../lib/mock-data';
 import { parseM3U } from '../lib/m3u-parser';
 import { base64Decode } from '../lib/base64';
+import { getOrCreateDeviceData } from '../utils/device';
 
 export interface PlaylistCategories {
   live: { id: string; name: string }[];
   vod: { id: string; name: string }[];
   series: { id: string; name: string }[];
+}
+
+export interface CategoryPreferences {
+  hiddenIds: string[];
+  liveOrder: string[];
+  vodOrder: string[];
+  seriesOrder: string[];
 }
 
 export interface WatchedItem {
@@ -56,10 +66,37 @@ export interface WatchedItem {
 }
 
 interface AppState {
+  deviceId: string;
+  deviceKey: string;
+  categoryPreferences: Record<string, CategoryPreferences>;
+  updateCategoryPreferences: (playlistId: string, prefs: Partial<CategoryPreferences>) => void;
+  lazyLoadContent: boolean;
+  setLazyLoadContent: (val: boolean) => void;
+  autoPlayOnStartup: boolean;
+  setAutoPlayOnStartup: (val: boolean) => void;
+  currentThemeId: string;
+  setTheme: (id: string) => void;
+  lastWatchedChannel: any | null;
+  setLastWatchedChannel: (channel: any) => void;
   isLoggedIn: boolean;
-  user: { name: string; email: string; plan: string } | null;
-  login: (name: string, email?: string) => void;
+  user: any | null;
+  appExpiry: string | null;
+  login: (token: string, customer?: any) => void;
   logout: () => void;
+  setupSseConnection: () => void;
+
+  parentalPin: string | null;
+  setParentalPin: (pin: string | null) => void;
+  unlockedCategories: string[];
+  unlockCategory: (categoryName: string) => void;
+  lockAllCategories: () => void;
+  isParentalLocked: (categoryName: string) => boolean;
+
+  lockedChannels: string[];
+  unlockedChannels: string[];
+  toggleChannelLock: (id: string) => void;
+  unlockChannel: (id: string) => void;
+  isChannelLocked: (id: string) => boolean;
 
   activePlaylistId: string;
   appIsReady: boolean;
@@ -122,6 +159,9 @@ interface AppState {
   setPlaybackQueue: (queue: Channel[], index: number) => void;
   setPlaybackIndex: (index: number) => void;
 
+  globalShowTour: boolean;
+  setGlobalShowTour: (show: boolean) => void;
+
   favorites: string[];
   favoriteItems: Channel[];
   toggleFavorite: (item: Channel) => void;
@@ -146,8 +186,24 @@ interface AppState {
     forceHttp: boolean;
     notifications: boolean;
     parentalControl: boolean;
+    liveTvPlayer: 'android' | 'exo';
+    vodPlayer: 'android' | 'exo';
+    autoBoot: boolean;
+    language: 'en' | 'ar';
   };
   updateSettings: (s: Partial<AppState['settings']>) => void;
+  setLanguage: (lang: 'en' | 'ar') => void;
+
+  moreOptions: {
+    streamUrlRedirectionCheck: boolean;
+    liveTvEpg: boolean;
+    useExtensionInStreamUrl: boolean;
+    useM3uFormatInStreamUrl: boolean;
+    useRuntimeFunctionInMovies: boolean;
+    useRuntimeFunctionInSeries: boolean;
+    useUtf8Decode: boolean;
+  };
+  updateMoreOptions: (opts: Partial<AppState['moreOptions']>) => void;
 
   continueWatching: WatchedItem[];
   updateContinueWatching: (item: WatchedItem) => void;
@@ -162,9 +218,15 @@ interface AppState {
   resumeDownload: (id: string) => Promise<void>;
   cancelDownload: (id: string) => Promise<void>;
 
+  clearAppCache: () => Promise<void>;
+  
   initializeFromStorage: () => Promise<void>;
+  checkAuthStatus: () => Promise<void>;
   isPlayerOpen: boolean;
   setIsPlayerOpen: (isOpen: boolean) => void;
+
+  syncAdminSubscriptions: (subscriptions: { id: string; host: string; username: string; password: string; name: string }[]) => Promise<void>;
+  syncM3uPlaylists: (playlists: { name: string; url: string }[]) => Promise<void>;
 }
 
 export interface DownloadItem {
@@ -222,7 +284,62 @@ const fetchWithXHR = (targetUrl: string, acceptHeader?: string): Promise<string>
   });
 
 export const useAppStore = create<AppState>((set, get) => ({
+  deviceId: '',
+  deviceKey: '',
+  currentThemeId: 'default',
+  setTheme: (id) => set({ currentThemeId: id }),
   isLoggedIn: false,
+
+  parentalPin: null,
+  setParentalPin: (pin) => {
+    set({ parentalPin: pin });
+    if (pin !== null) {
+      AsyncStorage.setItem('parental_pin', pin).catch(console.error);
+    } else {
+      AsyncStorage.removeItem('parental_pin').catch(console.error);
+    }
+  },
+  unlockedCategories: [],
+  unlockCategory: (categoryName) => set((state) => {
+    if (!state.unlockedCategories.includes(categoryName)) {
+      return { unlockedCategories: [...state.unlockedCategories, categoryName] };
+    }
+    return state;
+  }),
+  lockAllCategories: () => set({ unlockedCategories: [], unlockedChannels: [] }),
+  isParentalLocked: (categoryName) => {
+    const { parentalPin, unlockedCategories } = get();
+    if (!parentalPin) return false;
+    if (unlockedCategories.includes(categoryName)) return false;
+    
+    const lowerName = categoryName.toLowerCase();
+    const adultKeywords = ['adult', '18+', 'xxx', 'porn', 'for adults'];
+    return adultKeywords.some(keyword => lowerName.includes(keyword));
+  },
+
+  lockedChannels: [],
+  unlockedChannels: [],
+  toggleChannelLock: (id) => set((state) => {
+    const isLocked = state.lockedChannels.includes(id);
+    const newLocked = isLocked 
+      ? state.lockedChannels.filter(c => c !== id)
+      : [...state.lockedChannels, id];
+    
+    AsyncStorage.setItem('locked_channels', JSON.stringify(newLocked)).catch(console.error);
+    return { lockedChannels: newLocked };
+  }),
+  unlockChannel: (id) => set((state) => {
+    if (!state.unlockedChannels.includes(id)) {
+      return { unlockedChannels: [...state.unlockedChannels, id] };
+    }
+    return state;
+  }),
+  isChannelLocked: (id) => {
+    const { parentalPin, lockedChannels, unlockedChannels } = get();
+    if (!parentalPin) return false;
+    if (unlockedChannels.includes(id)) return false;
+    return lockedChannels.includes(id);
+  },
   globalAlert: null,
   showGlobalAlert: (title, message, buttonText, onPress, secondaryButton) => set({ globalAlert: { title, message, buttonText, onPress, secondaryButton } }),
   hideGlobalAlert: () => set({ globalAlert: null }),
@@ -448,12 +565,187 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  login: (name, email) => {
-    const userData = { name, email: email ?? '', plan: 'Premium' };
+  clearAppCache: async () => {
+    try {
+      // 1. Clear all keys from AsyncStorage except user login if we want to keep it, 
+      // but usually "Clear Cache" in these apps means a fresh start.
+      const allKeys = await AsyncStorageOriginal.getAllKeys();
+      // Keep 'user' and 'playlists' if you don't want the user to log out
+      const keysToRemove = allKeys.filter(key => key !== 'user' && key !== 'playlists' && key !== 'activePlaylistId');
+      await AsyncStorageOriginal.multiRemove(keysToRemove);
+
+      // 2. Clear large data files from FileSystem (if any)
+      if (Platform.OS !== 'web') {
+        const cacheDir = (FileSystem as any).cacheDirectory;
+        if (cacheDir) {
+          const files = await FileSystem.readDirectoryAsync(cacheDir);
+          for (const file of files) {
+            await FileSystem.deleteAsync(cacheDir + file, { idempotent: true });
+          }
+        }
+      } else {
+        // Clear Web cache via Proxy API if available
+        fetch('/api/cache/clear', { method: 'DELETE' }).catch(() => {});
+      }
+
+      // 3. Reset in-memory state
+      globalChannelsCache.clear();
+      globalSearchIndex = [];
+      set({ 
+        channels: [], 
+        continueWatching: [], 
+        favorites: [], 
+        favoriteItems: [],
+        searchIndexReady: false 
+      });
+
+      console.log('[Store]: App Cache cleared successfully');
+    } catch (e) {
+      console.error('[Store]: Failed to clear app cache', e);
+    }
+  },
+
+  syncM3uPlaylists: async (playlists) => {
+    let currentPlaylists = [...get().playlists];
+    // Remove all existing m3u playlists (we trust the server as the source of truth)
+    currentPlaylists = currentPlaylists.filter(p => !p.id.startsWith('m3u_'));
+    
+    // Add the new m3u playlists
+    const newPlaylists = playlists.map((p, i) => ({
+      id: `m3u_${Date.now()}_${i}`,
+      name: p.name,
+      url: p.url,
+      channels: 0,
+      updated: new Date().toLocaleDateString('en-US'),
+      lastUpdatedTimestamp: Date.now(),
+    }));
+    
+    currentPlaylists = [...currentPlaylists, ...newPlaylists];
+    set({ playlists: currentPlaylists });
+    await AsyncStorage.setItem('playlists', JSON.stringify(currentPlaylists));
+  },
+
+  syncAdminSubscriptions: async (subscriptions) => {
+    const btoa = (str: string) => typeof window !== 'undefined' ? window.btoa(str) : Buffer.from(str).toString('base64');
+    const AsyncStorageOriginal = typeof window !== 'undefined' ? require('@react-native-async-storage/async-storage').default : null;
+    
+    const adminIds = subscriptions.map(s => `admin_sub_${s.id}`);
+    
+    // Remove old admin subscriptions that are no longer in the list
+    let currentPlaylists = [...get().playlists];
+    const oldAdminPlaylists = currentPlaylists.filter(p => p.id.startsWith('admin_sub_') && !adminIds.includes(p.id));
+    for (const old of oldAdminPlaylists) {
+      currentPlaylists = currentPlaylists.filter(p => p.id !== old.id);
+      if (AsyncStorageOriginal) {
+        try {
+          await AsyncStorageOriginal.removeItem(`channels_${old.id}`);
+          await AsyncStorageOriginal.removeItem(`categories_${old.id}`);
+        } catch(e) {}
+      }
+    }
+    
+    let activePlaylistIdChanged = false;
+    if (oldAdminPlaylists.some(p => p.id === get().activePlaylistId)) {
+      activePlaylistIdChanged = true;
+    }
+
+    // Process new/updated subscriptions
+    for (const sub of subscriptions) {
+      const playlistId = `admin_sub_${sub.id}`;
+      const credentials = JSON.stringify({ host: sub.host, username: sub.username, password: sub.password });
+      const xtreamUrl = `xtream://${btoa(credentials)}`;
+      
+      const existingIndex = currentPlaylists.findIndex(p => p.id === playlistId);
+      let needsUpdate = false;
+      let existing = null;
+      
+      if (existingIndex >= 0) {
+        existing = currentPlaylists[existingIndex];
+        if (existing.url !== xtreamUrl || existing.name !== sub.name) {
+          needsUpdate = true;
+        }
+      } else {
+        needsUpdate = true;
+      }
+      
+      if (needsUpdate) {
+        try {
+          const hostClean = sub.host.endsWith('/') ? sub.host.slice(0, -1) : sub.host;
+          const m3uUrl = `${hostClean}/get.php?username=${sub.username}&password=${sub.password}&type=m3u_plus&output=ts`;
+          const { channels, expireText } = await get().loadPlaylistFromUrl(playlistId, m3uUrl);
+          
+          if (existingIndex >= 0 && existing) {
+            currentPlaylists[existingIndex] = { ...existing, url: xtreamUrl, name: sub.name, channels, updated: expireText || 'Active', lastUpdatedTimestamp: Date.now() };
+          } else {
+            currentPlaylists.push({
+              id: playlistId,
+              name: sub.name || "admin_subscription",
+              url: xtreamUrl,
+              channels,
+              updated: expireText || 'Active',
+              lastUpdatedTimestamp: Date.now(),
+            });
+            if (!get().activePlaylistId || activePlaylistIdChanged) {
+              set({ activePlaylistId: playlistId });
+              activePlaylistIdChanged = false;
+            }
+          }
+        } catch (err) {
+          console.error(`Failed to sync admin playlist ${sub.name}`, err);
+        }
+      }
+    }
+    
+    set({ playlists: currentPlaylists });
+    if (AsyncStorageOriginal) {
+      try {
+        await AsyncStorageOriginal.setItem('playlists', JSON.stringify(currentPlaylists));
+        const currentActive = get().activePlaylistId;
+        if (currentActive && !currentPlaylists.some(p => p.id === currentActive) && currentPlaylists.length > 0) {
+          set({ activePlaylistId: currentPlaylists[0].id });
+          await AsyncStorageOriginal.setItem('activePlaylistId', currentPlaylists[0].id);
+        } else if (currentActive) {
+          await AsyncStorageOriginal.setItem('activePlaylistId', currentActive);
+        }
+      } catch(e){}
+    }
+  },
+
+  categoryPreferences: {},
+  updateCategoryPreferences: (playlistId, prefs) => {
+    set((state) => {
+      const current = state.categoryPreferences[playlistId] || { hiddenIds: [], liveOrder: [], vodOrder: [], seriesOrder: [] };
+      const nextPrefs = { ...state.categoryPreferences, [playlistId]: { ...current, ...prefs } };
+      AsyncStorage.setItem('categoryPreferences', JSON.stringify(nextPrefs));
+      return { categoryPreferences: nextPrefs };
+    });
+  },
+
+  lazyLoadContent: true,
+  setLazyLoadContent: (val: boolean) => {
+    set({ lazyLoadContent: val });
+    AsyncStorage.setItem('lazyLoadContent', JSON.stringify(val));
+  },
+
+  autoPlayOnStartup: false,
+  setAutoPlayOnStartup: (val: boolean) => {
+    set({ autoPlayOnStartup: val });
+    AsyncStorage.setItem('autoPlayOnStartup', JSON.stringify(val));
+  },
+
+  lastWatchedChannel: null,
+  setLastWatchedChannel: (channel: any) => {
+    set({ lastWatchedChannel: channel });
+    AsyncStorage.setItem('lastWatchedChannel', JSON.stringify(channel));
+  },
+
+  login: (token, customer) => {
+    const userData = customer ? { ...customer, token } : { token, plan: 'Premium' };
     set({ isLoggedIn: true, user: userData });
     AsyncStorage.setItem('user', JSON.stringify(userData));
   },
   logout: () => {
+    console.trace('LOGOUT TRIGGERED');
     set({ isLoggedIn: false, user: null });
     AsyncStorage.removeItem('user');
   },
@@ -648,7 +940,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     // Build the list of URLs to try for this playlist load.
     // For Xtream Codes the url was already built by playlists.tsx as the
     // get.php URL; we also generate a simplified path variant as fallback.
-    const getPhpMatch = url.match(/^(https?:\/\/[^/]+)\/get\.php\?username=([^&]+)&password=([^&]+)/);
+    let getPhpMatch = url.match(/^(https?:\/\/[^/]+)\/get\.php\?username=([^&]+)&password=([^&]+)/);
+    
+    if (url.startsWith('xtream://')) {
+      try {
+        const b64 = url.replace('xtream://', '');
+        const creds = JSON.parse(typeof window !== 'undefined' ? window.atob(b64) : Buffer.from(b64, 'base64').toString());
+        getPhpMatch = [url, creds.host, creds.username, creds.password];
+      } catch(e) {}
+    }
     
     // If it is an Xtream Codes URL, try fetching via player_api.php dynamically
     // to avoid the IPTV server crashing with a 500 error on get.php.
@@ -689,6 +989,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
         
         if (accountInfo.user_info.status !== 'Active') {
+          console.log('LOGOUT TRIGGERED FROM APP-STORE.TS: status !== Active. Status was:', accountInfo.user_info.status);
+          get().setSubscriptionExpired(true);
+          get().logout();
           throw new Error(`Account status is: ${accountInfo.user_info.status || 'Expired or Inactive'}`);
         }
 
@@ -731,6 +1034,42 @@ export const useAppStore = create<AppState>((set, get) => ({
 
           set({ activeCategories: categoriesObj });
           await AsyncStorage.setItem(`categories_${playlistId}`, JSON.stringify(categoriesObj));
+
+          // If NOT lazy loading, we must fetch ALL streams now and cache them!
+          if (!get().lazyLoadContent) {
+            onProgress?.('Downloading all streams... This may take a while.');
+            
+            try {
+              const [liveStreams, vodStreams, seriesStreams] = await Promise.all([
+                fetchJsonWithFallback(`${host}/player_api.php?username=${username}&password=${password}&action=get_live_streams&_t=${Date.now()}`).catch(() => []),
+                fetchJsonWithFallback(`${host}/player_api.php?username=${username}&password=${password}&action=get_vod_streams&_t=${Date.now()}`).catch(() => []),
+                fetchJsonWithFallback(`${host}/player_api.php?username=${username}&password=${password}&action=get_series&_t=${Date.now()}`).catch(() => [])
+              ]);
+
+              onProgress?.('Processing and saving all streams locally...');
+              
+              // Helper to group by category and save to storage
+              const saveStreamsByCategory = async (streams: any[], type: 'live' | 'vod' | 'series') => {
+                if (!Array.isArray(streams)) return;
+                const catMap = new Map<string, any[]>();
+                for (const s of streams) {
+                  const cid = String(s.category_id || 'unknown');
+                  if (!catMap.has(cid)) catMap.set(cid, []);
+                  catMap.get(cid)!.push(s);
+                }
+                for (const [cid, items] of catMap.entries()) {
+                  await AsyncStorage.setItem(`channels_v4_${playlistId}_${type}_${cid}`, JSON.stringify(items));
+                }
+              };
+
+              await saveStreamsByCategory(liveStreams, 'live');
+              await saveStreamsByCategory(vodStreams, 'vod');
+              await saveStreamsByCategory(seriesStreams, 'series');
+              console.log('[Xtream Import] Downloaded and cached all streams successfully.');
+            } catch (err) {
+              console.warn('[Xtream Import] Failed to download all streams upfront:', err);
+            }
+          }
 
           const totalCategories = liveCategories.length + vodCategories.length + seriesCategories.length;
 
@@ -1022,20 +1361,26 @@ export const useAppStore = create<AppState>((set, get) => ({
             for (const item of rawStreams) {
               if (!item || !item.name) continue;
               
+              let decodedName = item.name;
+              if (get().moreOptions.useUtf8Decode) {
+                try { decodedName = decodeURIComponent(escape(item.name)); } catch (e) {}
+              }
+              
               let quality: '4K' | 'FHD' | 'HD' = 'HD';
-              if (item.name.toUpperCase().includes('4K') || item.name.toUpperCase().includes('UHD')) {
+              if (decodedName.toUpperCase().includes('4K') || decodedName.toUpperCase().includes('UHD')) {
                 quality = '4K';
-              } else if (item.name.toUpperCase().includes('FHD') || item.name.toUpperCase().includes('1080')) {
+              } else if (decodedName.toUpperCase().includes('FHD') || decodedName.toUpperCase().includes('1080')) {
                 quality = 'FHD';
               }
               
               if (type === 'live' && item.stream_id) {
-                const streamUrl = `${config.host}/live/${config.username}/${config.password}/${item.stream_id}.m3u8`;
+                const ext = get().moreOptions.useM3uFormatInStreamUrl ? '.m3u8' : (get().moreOptions.useExtensionInStreamUrl ? '.ts' : '');
+                const streamUrl = `${config.host}/live/${config.username}/${config.password}/${item.stream_id}${ext}`;
                 const hasArchive = item.tv_archive === 1 || item.tv_archive === '1';
                 const archiveDuration = parseInt(item.tv_archive_duration, 10) || 0;
                 channelsList.push({
                   id: `xt_live_${item.stream_id}`,
-                  name: item.name,
+                  name: decodedName,
                   logo: item.stream_icon || '',
                   category: categoryName,
                   streamUrl,
@@ -1049,10 +1394,11 @@ export const useAppStore = create<AppState>((set, get) => ({
                   num: item.num
                 });
               } else if (type === 'vod' && item.stream_id) {
-                const streamUrl = `${config.host}/movie/${config.username}/${config.password}/${item.stream_id}.${item.container_extension || 'mp4'}`;
+                const ext = get().moreOptions.useExtensionInStreamUrl ? `.${item.container_extension || 'mp4'}` : '';
+                const streamUrl = `${config.host}/movie/${config.username}/${config.password}/${item.stream_id}${ext}`;
                 channelsList.push({
                   id: `xt_vod_${item.stream_id}`,
-                  name: item.name,
+                  name: decodedName,
                   logo: item.stream_icon || '',
                   category: categoryName,
                   streamUrl,
@@ -1063,13 +1409,13 @@ export const useAppStore = create<AppState>((set, get) => ({
                   type: 'vod'
                 });
               } else if (type === 'series' && item.series_id) {
-                const streamUrl = `${config.host}/series/${config.username}/${config.password}/${item.series_id}.m3u8`;
+                const streamUrl = `${config.host}/series/${config.username}/${config.password}/${item.series_id}`;
                 if (channelsList.length > 0) {
                   // Do not store in cache to prevent OOM crashes
                 }
                 channelsList.push({
                   id: `xt_series_${item.series_id}`,
-                  name: item.name,
+                  name: decodedName,
                   logo: item.cover || '',
                   category: categoryName,
                   streamUrl,
@@ -1133,6 +1479,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   setPlaybackQueue: (queue, index) => set({ playbackQueue: queue, playbackIndex: index }),
   setPlaybackIndex: (index) => set({ playbackIndex: index }),
 
+  globalShowTour: false,
+  setGlobalShowTour: (show) => set({ globalShowTour: show }),
+
   favorites: [],
   favoriteItems: [],
   toggleFavorite: (item) => {
@@ -1161,11 +1510,87 @@ export const useAppStore = create<AppState>((set, get) => ({
     forceHttp: false,
     notifications: true,
     parentalControl: false,
+    liveTvPlayer: 'exo',
+    vodPlayer: 'exo',
+    autoBoot: false,
+    language: 'en',
   },
-  updateSettings: (s) =>
-    set((state) => ({ settings: { ...state.settings, ...s } })),
+  updateSettings: (s) => set((state) => {
+    const newSettings = { ...state.settings, ...s };
+    AsyncStorage.setItem('settings', JSON.stringify(newSettings));
+    return { settings: newSettings };
+  }),
+
+  setLanguage: (lang) => {
+    set((state) => {
+      const newSettings = { ...state.settings, language: lang };
+      AsyncStorage.setItem('settings', JSON.stringify(newSettings));
+      return { settings: newSettings };
+    });
+  },
+
+  moreOptions: {
+    streamUrlRedirectionCheck: false,
+    liveTvEpg: true,
+    useExtensionInStreamUrl: true,
+    useM3uFormatInStreamUrl: false,
+    useRuntimeFunctionInMovies: false,
+    useRuntimeFunctionInSeries: false,
+    useUtf8Decode: false,
+  },
+  updateMoreOptions: (opts) => {
+    set((state) => {
+      const newOptions = { ...state.moreOptions, ...opts };
+      AsyncStorage.setItem('moreOptions', JSON.stringify(newOptions));
+      return { moreOptions: newOptions };
+    });
+  },
 
   appIsReady: false,
+  appExpiry: null,
+
+  checkAuthStatus: async () => {
+    try {
+      const deviceData = await getOrCreateDeviceData();
+      let SERVER_URL = 'https://entecstreamingnestjs-production.up.railway.app/api';
+      
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        if (window.location.hostname.includes('192.168')) {
+          const ip = window.location.host.split(':')[0];
+          SERVER_URL = `http://${ip}:3000/api`;
+        } else if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+          SERVER_URL = 'http://localhost:3000/api';
+        }
+      } else if (__DEV__) {
+        SERVER_URL = Platform.OS === 'android' ? 'http://10.0.2.2:3000/api' : 'http://localhost:3000/api';
+      }
+
+      const response = await fetch(`${SERVER_URL}/client/auth`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ macAddress: deviceData.macAddress, deviceKey: deviceData.deviceKey }),
+      });
+      
+      if (response.status === 401 || response.status === 403 || response.status === 404) {
+        console.log('[checkAuthStatus] User deleted or blocked. Logging out.');
+        get().logout();
+      } else if (response.ok) {
+        const data = await response.json();
+        if (data && data.customer && data.customer.subscriptions) {
+           // Get appExpiry from the first matching subscription (they all share the same for a MAC)
+           const currentMacSub = data.customer.subscriptions.find((s: any) => s.macAddress === deviceData.macAddress);
+           if (currentMacSub && currentMacSub.appExpiry) {
+             set({ appExpiry: currentMacSub.appExpiry });
+           } else {
+             set({ appExpiry: null });
+           }
+           await get().syncAdminSubscriptions(data.customer.subscriptions);
+        }
+      }
+    } catch (err) {
+      console.warn('[checkAuthStatus] Error checking auth status', err);
+    }
+  },
 
   initializeFromStorage: async () => {
     try {
@@ -1175,18 +1600,95 @@ export const useAppStore = create<AppState>((set, get) => ({
       const storedSettings = await AsyncStorage.getItem('settings');
       const storedContinueWatching = await AsyncStorage.getItem('continueWatching');
       const storedDownloads = await AsyncStorage.getItem('downloads');
+      const storedCatPrefs = await AsyncStorage.getItem('categoryPreferences');
+      const storedLazyLoad = await AsyncStorage.getItem('lazyLoadContent');
+      const storedAutoPlay = await AsyncStorage.getItem('autoPlayOnStartup');
+      const storedLastWatched = await AsyncStorage.getItem('lastWatchedChannel');
+      const storedMoreOptions = await AsyncStorage.getItem('moreOptions');
+      const storedParentalPin = await AsyncStorage.getItem('parental_pin');
+      const storedLockedChannels = await AsyncStorage.getItem('locked_channels');
 
-      const updates: Partial<AppState> = {};
+      const deviceData = await getOrCreateDeviceData();
 
-      if (storedUser) {
-        updates.isLoggedIn = true;
-        updates.user = JSON.parse(storedUser);
+      const updates: Partial<AppState> = {
+        deviceId: deviceData.macAddress,
+        deviceKey: deviceData.deviceKey,
+      };
+
+      let SERVER_URL = 'https://entecstreamingnestjs-production.up.railway.app/api';
+      
+      if (__DEV__) {
+        const hostUri = Constants.expoConfig?.hostUri;
+        if (hostUri) {
+          const ip = hostUri.split(':')[0];
+          SERVER_URL = `http://${ip}:3000/api`;
+        } else {
+          SERVER_URL = Platform.OS === 'android' ? 'http://10.0.2.2:3000/api' : 'http://localhost:3000/api';
+        }
+      } else if (Platform.OS === 'web' && typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
+        SERVER_URL = 'http://localhost:3000/api';
+      }
+
+      let isBackendAuthorized = false;
+      try {
+        // Register Device First
+        await fetch(`${SERVER_URL}/client/register-device`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({ macAddress: deviceData.macAddress, deviceKey: deviceData.deviceKey }),
+        });
+
+        const response = await fetch(`${SERVER_URL}/client/auth`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({ macAddress: deviceData.macAddress, deviceKey: deviceData.deviceKey }),
+        });
+        if (response.ok) {
+          isBackendAuthorized = true;
+        } else if (response.status === 401 || response.status === 403 || response.status === 404) {
+          isBackendAuthorized = false;
+          await AsyncStorage.removeItem('user');
+          await AsyncStorage.removeItem('activePlaylistId');
+        } else {
+          isBackendAuthorized = storedUser ? true : false;
+        }
+      } catch (e) {
+        // Network error, keep existing state
+        isBackendAuthorized = storedUser ? true : false;
+      }
+
+      if (storedLockedChannels) {
+        try {
+          updates.lockedChannels = JSON.parse(storedLockedChannels);
+        } catch (e) {
+          console.error("Failed to parse locked channels", e);
+        }
       }
       if (storedFavs) updates.favorites = JSON.parse(storedFavs);
       if (storedFavItems) updates.favoriteItems = JSON.parse(storedFavItems);
       if (storedSettings) updates.settings = { ...get().settings, ...JSON.parse(storedSettings) };
-      if (storedContinueWatching) updates.continueWatching = JSON.parse(storedContinueWatching);
+      if (storedContinueWatching) {
+        try {
+          const parsed = JSON.parse(storedContinueWatching);
+          if (Array.isArray(parsed)) {
+            updates.continueWatching = parsed.map(item => ({
+              ...item,
+              title: item.title || item.name || 'Unknown Title',
+              poster: item.poster || item.logo || item.thumbnail || '',
+              backdrop: item.backdrop || item.poster || item.logo || '',
+            })).filter(item => item.id && item.streamUrl);
+          }
+        } catch (e) {
+          console.warn('Failed to parse continueWatching', e);
+        }
+      }
       if (storedDownloads) updates.downloads = JSON.parse(storedDownloads);
+      if (storedCatPrefs) updates.categoryPreferences = JSON.parse(storedCatPrefs);
+      if (storedLazyLoad !== null) updates.lazyLoadContent = JSON.parse(storedLazyLoad);
+      if (storedAutoPlay !== null) updates.autoPlayOnStartup = JSON.parse(storedAutoPlay);
+      if (storedLastWatched !== null) updates.lastWatchedChannel = JSON.parse(storedLastWatched);
+      if (storedMoreOptions) updates.moreOptions = { ...get().moreOptions, ...JSON.parse(storedMoreOptions) };
+      if (storedParentalPin !== null) updates.parentalPin = storedParentalPin;
 
       set(updates as any);
 
@@ -1197,6 +1699,27 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({ playlists: loadedPlaylists });
       } else {
         set({ playlists: [] });
+      }
+
+      if (isBackendAuthorized && storedUser && loadedPlaylists.length > 0) {
+        updates.isLoggedIn = true;
+        updates.user = JSON.parse(storedUser);
+      } else {
+        updates.isLoggedIn = false;
+        updates.user = null;
+      }
+
+      set(updates as any);
+
+      // Fetch custom M3U playlists from the server if we have device data
+      try {
+        const plRes = await fetch(`${SERVER_URL}/portal/playlists?macAddress=${deviceData.macAddress}&deviceKey=${deviceData.deviceKey}`);
+        if (plRes.ok) {
+          const serverPlaylists = await plRes.json();
+          await get().syncM3uPlaylists(serverPlaylists);
+        }
+      } catch (err) {
+        console.warn('Could not fetch server playlists', err);
       }
 
       const activeId = await AsyncStorage.getItem('activePlaylistId');
@@ -1241,10 +1764,66 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (cwStr) set({ continueWatching: JSON.parse(cwStr) ?? [] });
 
       set({ appIsReady: true });
+      get().setupSseConnection();
     } catch (e) {
       console.error('Failed to load store', e);
       set({ appIsReady: true });
     }
+  },
+
+  setupSseConnection: () => {
+    const { deviceId } = get();
+    if (!deviceId) return;
+
+    let SERVER_URL = 'https://entecstreamingnestjs-production.up.railway.app/api';
+    if (__DEV__) {
+      const hostUri = Constants.expoConfig?.hostUri;
+      if (hostUri) {
+        const ip = hostUri.split(':')[0];
+        SERVER_URL = `http://${ip}:3000/api`;
+      } else {
+        SERVER_URL = Platform.OS === 'android' ? 'http://10.0.2.2:3000/api' : 'http://localhost:3000/api';
+      }
+    } else if (Platform.OS === 'web' && typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
+      SERVER_URL = 'http://localhost:3000/api';
+    }
+
+    const sseUrl = `${SERVER_URL}/client/events?macAddress=${deviceId}`;
+    
+    // Close existing connection if any
+    const existingEs = (global as any).__appSseConnection;
+    if (existingEs) {
+      existingEs.close();
+    }
+
+    const EventSourceConstructor = typeof window !== 'undefined' ? window.EventSource : (global as any).EventSource;
+    if (!EventSourceConstructor) {
+      console.warn('[SSE] EventSource is not supported on this platform natively.');
+      return;
+    }
+
+    const es = new EventSourceConstructor(sseUrl);
+    (global as any).__appSseConnection = es;
+
+    es.addEventListener('message', async (event: any) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data && data.type === 'REFRESH') {
+          console.log('[SSE] Received REFRESH event. Refreshing app data...');
+          await get().checkAuthStatus();
+          const currentPlaylistId = get().activePlaylistId;
+          if (currentPlaylistId) {
+            await get().refreshPlaylist(currentPlaylistId);
+          }
+        }
+      } catch (err) {
+        console.warn('[SSE] Error parsing event data:', err);
+      }
+    });
+
+    es.addEventListener('error', (err: any) => {
+      console.log('[SSE] Connection error. Reconnecting...');
+    });
   },
 
   getChannelsByType: async (type) => {
@@ -1257,14 +1836,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ searchIndexReady: false });
       return;
     }
-    set({ loadingSearchIndex: true });
     try {
-      const cached = await AsyncStorage.getItem(`search_index_v4_${playlistId}`);
-      if (cached) {
-        globalSearchIndex = JSON.parse(cached);
-        set({ searchIndexReady: true, loadingSearchIndex: false });
-        return;
-      }
+      set({ loadingSearchIndex: true });
       await get().buildSearchIndex(playlistId);
     } catch (e) {
       console.error('Failed to load search index', e);
@@ -1360,25 +1933,32 @@ export const useAppStore = create<AppState>((set, get) => ({
               if (Array.isArray(data)) {
                 for (const item of data) {
                   if (!item || !item.name) continue;
+
+                  let decodedName = item.name;
+                  if (get().moreOptions.useUtf8Decode) {
+                    try { decodedName = decodeURIComponent(escape(item.name)); } catch (e) {}
+                  }
+
                   let quality: '4K' | 'FHD' | 'HD' = 'HD';
-                  if (item.name.toUpperCase().includes('4K') || item.name.toUpperCase().includes('UHD')) quality = '4K';
-                  else if (item.name.toUpperCase().includes('FHD') || item.name.toUpperCase().includes('1080')) quality = 'FHD';
+                  if (decodedName.toUpperCase().includes('4K') || decodedName.toUpperCase().includes('UHD')) quality = '4K';
+                  else if (decodedName.toUpperCase().includes('FHD') || decodedName.toUpperCase().includes('1080')) quality = 'FHD';
                   
                   let streamUrl = '';
                   let id = '';
                   let logo = '';
                   
                   if (a.type === 'live' && item.stream_id) {
-                    streamUrl = `${config.host}/live/${config.username}/${config.password}/${item.stream_id}.ts`;
+                    const ext = get().moreOptions.useM3uFormatInStreamUrl ? '.m3u8' : (get().moreOptions.useExtensionInStreamUrl ? '.ts' : '');
+                    streamUrl = `${config.host}/live/${config.username}/${config.password}/${item.stream_id}${ext}`;
                     id = `xt_live_${item.stream_id}`;
                     logo = item.stream_icon || '';
                   } else if (a.type === 'vod' && item.stream_id) {
-                    const ext = item.container_extension || 'mp4';
-                    streamUrl = `${config.host}/movie/${config.username}/${config.password}/${item.stream_id}.${ext}`;
+                    const ext = get().moreOptions.useExtensionInStreamUrl ? `.${item.container_extension || 'mp4'}` : '';
+                    streamUrl = `${config.host}/movie/${config.username}/${config.password}/${item.stream_id}${ext}`;
                     id = `xt_vod_${item.stream_id}`;
                     logo = item.stream_icon || '';
                   } else if (a.type === 'series' && item.series_id) {
-                    streamUrl = `${config.host}/series/${config.username}/${config.password}/${item.series_id}.m3u8`;
+                    streamUrl = `${config.host}/series/${config.username}/${config.password}/${item.series_id}`;
                     id = `xt_series_${item.series_id}`;
                     logo = item.cover || '';
                   }
@@ -1388,7 +1968,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                     const archiveDuration = a.type === 'live' ? (parseInt(item.tv_archive_duration, 10) || 0) : 0;
                     tempIndex.push({
                       id,
-                      name: item.name,
+                      name: decodedName,
                       type: a.type as 'live' | 'vod' | 'series',
                       logo,
                       category: catMap.get(String(item.category_id)) || item.category_name || (item.name ? item.name.split(/[:|-]/)[0].trim() : 'Unknown'),
@@ -1446,12 +2026,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       globalSearchIndex = tempIndex;
       set({ searchIndexReady: true, loadingSearchIndex: false });
       onProgress?.('Search index ready!');
-      
-      try {
-        await AsyncStorage.setItem(`search_index_v4_${playlistId}`, JSON.stringify(tempIndex));
-      } catch (e) {
-        console.warn('Failed to save search index to cache', e);
-      }
     } catch (e) {
       console.error('Failed to build search index:', e);
       globalSearchIndex = [];

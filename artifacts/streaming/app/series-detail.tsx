@@ -5,25 +5,29 @@ import {
   Text, 
   StyleSheet, 
   ScrollView, 
-  Pressable, 
   Dimensions, 
   ActivityIndicator,
   Linking,
   Alert,
-  useWindowDimensions
+  useWindowDimensions,
+  Platform,
+  Modal
 } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
+import { PinModal } from '@/components/PinModal';
 import { useColors } from '@/hooks/useColors';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Lineicons } from '@lineiconshq/react-native-lineicons';
 import { PlayBulk, CheckCircle1Bulk, Download1Bulk, ArrowLeftBulk, HeartBulk, CameraMovie1Bulk, QuestionMarkCircleBulk, PlusBulk } from '@lineiconshq/free-icons';
 import { Image } from 'expo-image';
+import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { GoldButton } from '@/components/GoldButton';
 import { QualityBadge } from '@/components/QualityBadge';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useAppStore } from '@/store/app-store';
-import { base64Decode } from '@/lib/base64';
+import { base64Decode, base64Encode } from '@/lib/base64';
+import { useTranslation } from '@/hooks/useTranslation';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -130,11 +134,21 @@ export default function SeriesDetailScreen() {
 
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  const { t, isRTL } = useTranslation();
 
   const activePlaylistId = useAppStore((s) => s.activePlaylistId);
   const playlists = useAppStore((s) => s.playlists);
-  const favorites = useAppStore((s) => s.favorites);
   const toggleFavorite = useAppStore((s) => s.toggleFavorite);
+  const setPlaybackQueue = useAppStore((s) => s.setPlaybackQueue);
+  const isChannelLocked = useAppStore((s) => s.isChannelLocked);
+  const toggleChannelLock = useAppStore((s) => s.toggleChannelLock);
+  const unlockChannel = useAppStore((s) => s.unlockChannel);
+  const lockedChannels = useAppStore((s) => s.lockedChannels);
+  const parentalPin = useAppStore((s) => s.parentalPin);
+  const favorites = useAppStore((s) => s.favorites);
+
+  const [pinModalVisible, setPinModalVisible] = useState(false);
+  const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [episodes, setEpisodes] = useState<Episode[]>([]);
@@ -217,6 +231,27 @@ export default function SeriesDetailScreen() {
 
     fetchImages();
   }, [seriesInfo]);
+
+  const [hasAutoPlayed, setHasAutoPlayed] = useState(false);
+  useEffect(() => {
+    if ((params as any).autoPlay === 'true' && episodes.length > 0 && !hasAutoPlayed) {
+      setHasAutoPlayed(true);
+      const ep = episodes[0];
+      router.replace({
+        pathname: '/player',
+        params: {
+          streamUrl: ep.streamUrl,
+          title: `${params.title || 'Series'} - S${ep.season}:E${ep.number}`,
+          quality: 'FHD',
+          isLive: 'false',
+          id: ep.id,
+          type: 'series',
+          poster: base64Encode(ep.thumbnail),
+          backdrop: base64Encode(ep.thumbnail),
+        }
+      });
+    }
+  }, [episodes, params, hasAutoPlayed]);
 
   const seriesTitle = params.title || 'Series Detail';
   const seriesPoster = params.poster || '';
@@ -426,20 +461,44 @@ export default function SeriesDetailScreen() {
 
   const handleWatchFirst = () => {
     if (episodes.length > 0) {
-      const ep = episodes[0];
-      router.push({
-        pathname: '/player',
-        params: {
-          streamUrl: ep.streamUrl,
-          title: `${seriesTitle} - S${ep.season}:E${ep.number}`,
-          quality: seriesQuality,
-          isLive: 'false'
-        }
-      });
+      if (isChannelLocked(params.id || '')) {
+        setPendingAction(() => () => executeWatchFirst());
+        setPinModalVisible(true);
+        return;
+      }
+      executeWatchFirst();
     }
   };
 
+  const executeWatchFirst = () => {
+    const ep = episodes[0];
+    router.push({
+      pathname: '/player',
+      params: {
+        streamUrl: ep.streamUrl,
+        title: `${seriesTitle} - S${ep.season}:E${ep.number}`,
+        quality: seriesQuality,
+        isLive: 'false',
+        id: ep.id,
+        type: 'series',
+        poster: base64Encode(ep.thumbnail || seriesPoster),
+        backdrop: base64Encode(seriesBackdrop),
+        description: ep.title,
+        category: seriesGenres[0] || 'Series'
+      }
+    });
+  };
+
   const handleWatchEpisode = (ep: Episode, urlToPlay?: string) => {
+    if (isChannelLocked(params.id || '')) {
+      setPendingAction(() => () => executeWatchEpisode(ep, urlToPlay));
+      setPinModalVisible(true);
+      return;
+    }
+    executeWatchEpisode(ep, urlToPlay);
+  };
+
+  const executeWatchEpisode = (ep: Episode, urlToPlay?: string) => {
     router.push({
       pathname: '/player',
       params: {
@@ -448,9 +507,11 @@ export default function SeriesDetailScreen() {
         quality: seriesQuality,
         isLive: 'false',
         id: ep.id,
-        poster: seriesPoster,
-        backdrop: seriesBackdrop,
-        description: ep.title
+        type: 'series',
+        poster: base64Encode(ep.thumbnail || seriesPoster),
+        backdrop: base64Encode(seriesBackdrop),
+        description: ep.title,
+        category: seriesGenres[0] || 'Series'
       }
     });
   };
@@ -540,15 +601,23 @@ const description = seriesInfo?.plot || seriesDescription;
         <View style={[styles.heroSection, { height: Math.max(height * 0.70, 350) }]}>
           <Image source={{ uri: seriesBackdrop || seriesPoster }} style={StyleSheet.absoluteFill} contentFit="cover" />
           <LinearGradient
-            colors={['transparent', 'rgba(0,0,0,0.3)', colors.background]}
+            colors={['rgba(0,0,0,0.5)', 'rgba(0,0,0,0.2)', 'transparent']}
             style={StyleSheet.absoluteFill}
             locations={[0, 0.5, 1]}
           />
+          {/* Dark vignette sides */}
           <LinearGradient
-            colors={[colors.background, 'transparent']}
+            colors={isRTL ? ['rgba(0,0,0,0.5)', 'rgba(0,0,0,0.7)', 'rgba(0,0,0,0.95)'] : ['rgba(0,0,0,0.95)', 'rgba(0,0,0,0.7)', 'rgba(0,0,0,0.5)']}
+            locations={[0, 0.5, 1]}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 0 }}
-            style={[StyleSheet.absoluteFill, { width: '60%' }]}
+            style={StyleSheet.absoluteFill}
+          />
+          {/* Bottom fade into background */}
+          <LinearGradient
+            colors={['transparent', colors.background]}
+            style={StyleSheet.absoluteFill}
+            locations={[0.6, 1]}
           />
           <TVFocusable 
             style={[styles.backBtn, { top: insets.top + 10 }]} 
@@ -563,60 +632,90 @@ const description = seriesInfo?.plot || seriesDescription;
             <Lineicons icon={ArrowLeftBulk} size={28} color="#FFF" style={styles.shadowIcon} />
           </TVFocusable>
           
-          <View style={[styles.titleSection, { position: 'absolute', bottom: isLandscape ? 20 : 40, left: isLandscape ? 24 : 40, right: 24, zIndex: 10, alignItems: 'flex-start' }]}>
-            <Text 
-              style={[styles.title, { color: '#FFF', textAlign: 'left', fontSize: width < 768 ? (isLandscape ? 28 : 32) : 42, marginBottom: isLandscape ? 8 : 12 }]} 
-              numberOfLines={width < 768 ? (isLandscape ? 2 : 3) : 2}
-              adjustsFontSizeToFit
-            >
-              {seriesTitle}
-            </Text>
-            
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: isLandscape ? 12 : 20 }}>
-              <Text style={[styles.metaRowText, { color: '#E8A317', fontWeight: 'bold' }, isLandscape && { marginBottom: 0 }]}>
-                {rating.toFixed(1)} Rating
-              </Text>
-              <Text style={[styles.metaRowText, { color: '#CCC' }, isLandscape && { marginBottom: 0 }]}>{year}</Text>
-              <Text style={[styles.metaRowText, { color: '#CCC' }, isLandscape && { marginBottom: 0 }]}>{seasonsCount} {seasonsCount === 1 ? 'Season' : 'Seasons'}</Text>
-              <Text style={[styles.metaRowText, { color: '#CCC' }, isLandscape && { marginBottom: 0 }]}>{episodes.length} Episodes</Text>
-              <Text style={[styles.metaRowText, { color: '#CCC' }, isLandscape && { marginBottom: 0 }]}>{seriesGenres.slice(0, 2).join(' | ')}</Text>
-            </View>
+          {/* Hero body: adapts to landscape/portrait */}
+          <View style={{
+            position: 'absolute',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            flexDirection: isLandscape ? (isRTL ? 'row-reverse' : 'row') : 'column',
+            alignItems: isLandscape ? 'flex-end' : 'flex-start',
+            paddingHorizontal: isLandscape ? 40 : 20,
+            paddingBottom: 24,
+            gap: isLandscape ? 30 : 16,
+            zIndex: 20,
+          }}>
+            {/* Poster image */}
+            <Image
+              source={{ uri: seriesPoster || seriesBackdrop }}
+              style={{
+                width: isLandscape ? 180 : 120,
+                height: isLandscape ? 270 : 180,
+                borderRadius: 12,
+                backgroundColor: '#1A1A1A',
+                borderWidth: 2,
+                borderColor: 'rgba(255,255,255,0.18)',
+                flexShrink: 0,
+                alignSelf: isLandscape ? 'auto' : 'center',
+                marginTop: isLandscape ? 0 : 40,
+              }}
+              contentFit="cover"
+            />
 
-            <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }}>
+            {/* Info column */}
+            <View style={{ flex: 1, gap: 12, paddingBottom: 8, justifyContent: 'flex-end', width: '100%', alignItems: isLandscape ? (isRTL ? 'flex-end' : 'flex-start') : 'center' }}>
+
+              {/* Series Title */}
+              <Text
+                style={[
+                  styles.title,
+                  {
+                    color: '#FFF',
+                    textAlign: isLandscape ? (isRTL ? 'right' : 'left') : 'center',
+                    fontSize: width < 768 ? 24 : 36,
+                    marginBottom: 0,
+                  }
+                ]}
+                numberOfLines={2}
+                adjustsFontSizeToFit
+              >
+                {seriesTitle}
+              </Text>
+
+              {/* Rating + meta row */}
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: isLandscape ? (isRTL ? 'flex-end' : 'flex-start') : 'center', gap: 10, flexWrap: 'wrap' }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                  <Lineicons icon={HeartBulk} size={14} color="#E8A317" />
+                  <Text style={[styles.metaRowText, { color: '#E8A317', fontWeight: 'bold', marginBottom: 0 }]}>
+                    {rating.toFixed(1)}
+                  </Text>
+                </View>
+                <Text style={[styles.metaRowText, { color: '#CCC', marginBottom: 0 }]}>{year}</Text>
+                <Text style={[styles.metaRowText, { color: '#CCC', marginBottom: 0 }]}>{seasonsCount} {seasonsCount === 1 ? 'Season' : 'Seasons'}</Text>
+                <Text style={[styles.metaRowText, { color: '#CCC', marginBottom: 0 }]}>{episodes.length} Episodes</Text>
+                <Text style={[styles.metaRowText, { color: '#CCC', marginBottom: 0 }]}>{seriesGenres.slice(0, 2).join(' | ')}</Text>
+              </View>
+
+              {/* Watch Now button */}
               <LinearGradient
-                colors={['#D4A843', '#A67C2E']}
-                style={[styles.playPillContainer, { opacity: episodes.length === 0 ? 0.5 : 1 }]}
+                colors={['#D4A843', '#D4A843']}
+                style={[styles.playPillContainer, { alignSelf: isLandscape ? (isRTL ? 'flex-end' : 'flex-start') : 'stretch', marginTop: 8, opacity: episodes.length === 0 ? 0.5 : 1 }]}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 1, y: 0 }}
               >
-                <TVFocusable 
-                  style={styles.playPill}
+                <TVFocusable
+                  style={[styles.playPill, { justifyContent: 'center' }]}
                   onPress={handleWatchFirst}
                   disabled={episodes.length === 0}
                   scaleAmount={1.05}
                   focusedBorderColor="#FFF"
                   borderThickness={3}
+                  hasTVPreferredFocus={true}
                 >
-                  <Lineicons icon={PlayBulk} size={24} color="#1A1A1A" />
-                  <Text style={[styles.playPillText, { flexShrink: 1, textAlign: 'center' }]} numberOfLines={1}>
-                    Watch Now
-                  </Text>
+                  <Lineicons icon={PlayBulk} size={22} color="#1A1A1A" />
+                  <Text style={[styles.playPillText, { flexShrink: 1 }]} numberOfLines={1}>Watch Now</Text>
                 </TVFocusable>
               </LinearGradient>
-              
-              {/*
-              <TVFocusable 
-                style={[styles.playPill, { backgroundColor: 'rgba(255,255,255,0.1)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' }]}
-                onPress={handlePlayNative}
-                disabled={episodes.length === 0}
-                scaleAmount={1.05}
-                focusedBorderColor="#FFF"
-                borderThickness={3}
-              >
-                <Lineicons icon={PlayBulk} size={20} color="#FFF" />
-                <Text style={[styles.playPillText, { color: '#FFF' }]}>Native Player</Text>
-              </TVFocusable>
-              */}
             </View>
           </View>
         </View>
@@ -633,7 +732,7 @@ const description = seriesInfo?.plot || seriesDescription;
                   <TVFocusable 
                     key={actor.id} 
                     style={styles.castCard}
-                    onPress={undefined}
+                    onPress={() => router.push({ pathname: '/cast-detail', params: { actorName: actor.name } })}
                   >
                     {actor.image ? (
                       <Image source={{ uri: actor.image }} style={styles.castImage} contentFit="cover" />
@@ -655,6 +754,22 @@ const description = seriesInfo?.plot || seriesDescription;
                 <Lineicons icon={HeartBulk} size={20} color={isFavorite ? colors.gold : "#FFF"} />
               </View>
               <Text style={styles.actionIconText}>{isFavorite ? 'Favorited' : 'Favorite'}</Text>
+            </TVFocusable>
+
+            <TVFocusable 
+              style={styles.actionIconBtn} 
+              onPress={() => {
+                if (parentalPin) {
+                  setPinModalVisible(true);
+                } else {
+                  Alert.alert(t('parental'), t('set_pin_first' as any) || 'Please set a Parental PIN in Settings first to lock content.');
+                }
+              }}
+            >
+              <View style={styles.actionIconCircle}>
+                <Ionicons name="lock-closed" size={20} color={isChannelLocked(params.id || '') ? colors.gold : "#FFF"} />
+              </View>
+              <Text style={styles.actionIconText}>{isChannelLocked(params.id || '') ? 'Locked' : 'Lock'}</Text>
             </TVFocusable>
 
             {seriesInfo?.youtube_trailer || seriesInfo?.trailer ? (
@@ -760,6 +875,23 @@ const description = seriesInfo?.plot || seriesDescription;
 
         </View>
       </ScrollView>
+      <PinModal 
+        visible={pinModalVisible} 
+        expectedPin={parentalPin}
+        onCancel={() => {
+          setPinModalVisible(false);
+          setPendingAction(null);
+        }}
+        onSuccess={() => {
+          setPinModalVisible(false);
+          if (pendingAction) {
+            pendingAction();
+            setPendingAction(null);
+          } else {
+            toggleChannelLock(params.id || '');
+          }
+        }}
+      />
     </View>
   );
 }

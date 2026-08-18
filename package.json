@@ -1,6 +1,7 @@
 {
   "name": "workspace",
-  "version": "0.0.0",
+  "main": "expo-router/entry",
+  "version": "1.0.0",
   "license": "MIT",
   "scripts": {
     "build": "pnpm run typecheck && pnpm -r --if-present run build",
@@ -24,5 +25,12 @@
     "expo": "~54.0.35",
     "react": "19.1.0",
     "react-native": "0.81.5"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@firebase/util",
+      "esbuild",
+      "protobufjs"
+    ]
   }
 }

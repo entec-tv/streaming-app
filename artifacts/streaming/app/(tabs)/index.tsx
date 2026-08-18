@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, useWindowDimensions, Platform, RefreshControl } from 'react-native';
+import React, { useEffect, useState, useRef } from 'react';
+import { View, Text, StyleSheet, ScrollView, ActivityIndicator, useWindowDimensions, Platform, RefreshControl } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useColors } from '@/hooks/useColors';
+import { useTranslation } from '@/hooks/useTranslation';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Lineicons } from '@lineiconshq/react-native-lineicons';
-import { MonitorBulk, PlayBulk, QuestionMarkCircleBulk } from '@lineiconshq/free-icons';
+
+
 import { HeroCarousel } from '@/components/HeroCarousel';
 import { ContentRow } from '@/components/ContentRow';
 import { ChannelCard } from '@/components/ChannelCard';
@@ -23,6 +24,7 @@ import { useIsFocused } from '@react-navigation/native';
 export default function HomeScreen() {
   const isFocused = useIsFocused();
   const colors = useColors();
+  const { t } = useTranslation();
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
   const isLargeScreen = width >= 1024 || Platform.isTV;
@@ -38,9 +40,22 @@ export default function HomeScreen() {
   const [loading, setLoading] = useState(true);
   const [contentRows, setContentRows] = useState<{ title: string; type: 'live' | 'vod' | 'series'; categoryId: string; items: any[] }[]>([]);
   const [featuredItems, setFeaturedItems] = useState<any[]>([]);
+  const [tvHeroIndex, setTvHeroIndex] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  const hasAutoPlayed = useRef(false);
+
+  useEffect(() => {
+    if (!isLargeScreen || featuredItems.length <= 1 || !isFocused) return;
+    const interval = setInterval(() => {
+      setTvHeroIndex(prev => (prev + 1) % Math.min(featuredItems.length, 4));
+    }, 6000);
+    return () => clearInterval(interval);
+  }, [isLargeScreen, featuredItems.length, isFocused]);
   const subscriptionExpired = useAppStore((s) => s.subscriptionExpired);
   const setSubscriptionExpired = useAppStore((s) => s.setSubscriptionExpired);
+  
+  
+  const appIsReady = useAppStore((s) => s.appIsReady);
 
   const continueWatching = useAppStore((s) => s.continueWatching) || [];
   const favoriteItems = useAppStore((s) => s.favoriteItems) || [];
@@ -139,7 +154,7 @@ export default function HomeScreen() {
               return {
                 id: m.id,
                 title: m.name,
-                poster: m.logo || `https://ui-avatars.com/api/?name=${encodeURIComponent(m.name)}&background=1A1A1A&color=D4A843&bold=true&size=300&format=svg`,
+                poster: m.logo || `https://ui-avatars.com/api/?name=${encodeURIComponent(m.name)}&background=1A1A1A&color=${colors.gold.replace('#', '')}&bold=true&size=300&format=svg`,
                 backdrop: m.logo,
                 rating: 0,
                 year: 0,
@@ -194,12 +209,29 @@ export default function HomeScreen() {
 
         if (!active) return;
 
-        const pool = primaryHeroPool.length > 0 ? primaryHeroPool : fallbackHeroPool;
-        const shuffledPool = [...pool].sort(() => 0.5 - Math.random());
-        const top5 = shuffledPool.slice(0, 5);
+        let priorityHeroItems: Channel[] = [];
+        const arabicNowSeriesCategory = activeCategories.series?.find(c => c.name.includes('يعرض الآن عربي'));
+        const isNotUpcoming = (i: any) => {
+          const name = i.name || '';
+          const nameLower = name.toLowerCase();
+          return !name.includes('قريبا') && !name.includes('قريباً') && !name.includes('قريباٌ') && !nameLower.includes('coming soon');
+        };
 
-        const mappedFeatured = await Promise.all(top5.map(async (item) => {
-          let backdropUri = item.logo || `https://ui-avatars.com/api/?name=${encodeURIComponent(item.name)}&background=1A1A1A&color=D4A843&bold=true&size=300&format=svg`;
+        if (arabicNowSeriesCategory) {
+          const items = await getChannelsForCategory(activePlaylistId, 'series', arabicNowSeriesCategory.id, arabicNowSeriesCategory.name);
+          if (items && items.length > 0) {
+            priorityHeroItems = [...items].filter(isNotUpcoming).sort(() => 0.5 - Math.random()).slice(0, 4);
+          }
+        }
+
+        const pool = primaryHeroPool.length > 0 ? primaryHeroPool : fallbackHeroPool;
+        const shuffledPool = [...pool].filter(isNotUpcoming).sort(() => 0.5 - Math.random());
+        const fallbackItems = shuffledPool.slice(0, 4 - priorityHeroItems.length);
+        
+        const top4 = [...priorityHeroItems, ...fallbackItems];
+
+        const mappedFeatured = await Promise.all(top4.map(async (item) => {
+          let backdropUri = item.logo || `https://ui-avatars.com/api/?name=${encodeURIComponent(item.name)}&background=1A1A1A&color=${colors.gold.replace('#', '')}&bold=true&size=300&format=svg`;
           let description = item.type === 'live' ? `Live Channel · ${item.category}` : item.type === 'series' ? `TV Series · ${item.category}` : `Movie VOD · ${item.category}`;
 
           if (item.type === 'series' && config && item.id.startsWith('xt_series_')) {
@@ -242,7 +274,7 @@ export default function HomeScreen() {
           return {
             id: item.id,
             title: item.name,
-            subtitle: item.type === 'live' ? 'FEATURED LIVE TV' : item.type === 'series' ? 'FEATURED SERIES' : 'FEATURED MOVIE',
+            subtitle: item.type === 'live' ? t('featured_live') : item.type === 'series' ? t('featured_series') : t('featured_movie'),
             backdrop: { uri: backdropUri },
             poster: { uri: item.logo },
             description,
@@ -260,6 +292,21 @@ export default function HomeScreen() {
           setFeaturedItems(mappedFeatured);
           setCachedHomeContent(activePlaylistId, accumulatedRows, mappedFeatured);
         }
+        
+        if (active && useAppStore.getState().autoPlayOnStartup && !hasAutoPlayed.current) {
+          hasAutoPlayed.current = true;
+          const last = useAppStore.getState().lastWatchedChannel;
+          if (last && last.type === 'live') {
+             router.push(`/live/player?id=${encodeURIComponent(last.id)}&title=${encodeURIComponent(last.title)}&url=${encodeURIComponent(last.streamUrl)}` as any);
+          } else {
+             const liveRow = accumulatedRows.find(r => r.type === 'live');
+             if (liveRow && liveRow.items.length > 0) {
+                const item = liveRow.items[0];
+                router.push(`/live/player?id=${encodeURIComponent(item.id)}&title=${encodeURIComponent(item.title)}&url=${encodeURIComponent(item.streamUrl)}` as any);
+             }
+          }
+        }
+
       } catch (err) {
         console.error('Error loading Home content:', err);
       } finally {
@@ -277,55 +324,26 @@ export default function HomeScreen() {
     };
   }, [activePlaylistId, activeCategories, refreshKey]);
 
-  if (subscriptionExpired) {
-    return (
-      <View style={[styles.container, {
-        backgroundColor: colors.background,
-        justifyContent: 'center',
-        alignItems: 'center',
-        padding: 20,
-        position: 'absolute',
-        top: 0, bottom: 0, left: isLargeScreen ? -80 : 0, right: 0,
-        zIndex: 9999,
-        elevation: 9999
-      }]}>
-        <Ionicons name="warning-outline" size={64} color="#EF4444" />
-        <Text style={{ color: colors.text, fontSize: 24, fontWeight: 'bold', marginTop: 16 }}>Subscription Expired</Text>
-        <Text style={{ color: colors.mutedForeground, fontSize: 16, marginTop: 8, textAlign: 'center', maxWidth: 400 }}>
-          Your IPTV subscription has expired or is inactive. Please contact your provider to renew your subscription.
-        </Text>
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 16, marginTop: 24 }}>
-          <TVFocusable
-            style={{ backgroundColor: colors.gold, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 8 }}
-            onPress={() => router.push('/playlists')}
-          >
-            <Text style={{ color: '#1A1A1A', fontWeight: 'bold', fontSize: 16 }}>Manage Playlists</Text>
-          </TVFocusable>
-          <TVFocusable
-            style={{ backgroundColor: '#25D366', paddingHorizontal: 24, paddingVertical: 12, borderRadius: 8, flexDirection: 'row', alignItems: 'center', gap: 8 }}
-            onPress={() => {
-              const { Linking } = require('react-native');
-              Linking.openURL('https://wa.me/17085844733?text=' + encodeURIComponent('I want to renew my subscription'));
-            }}
-          >
-            <Ionicons name="logo-whatsapp" size={20} color="#FFF" />
-            <Text style={{ color: '#FFF', fontWeight: 'bold', fontSize: 16 }}>+17085844733</Text>
-          </TVFocusable>
-        </View>
-      </View>
-    );
-  }
+  useEffect(() => {
+    if (subscriptionExpired) {
+      console.log('LOGOUT TRIGGERED FROM INDEX.TSX');
+      useAppStore.getState().logout();
+      router.replace('/activation');
+    }
+  }, [subscriptionExpired]);
+
+
 
   if (!activePlaylistId) {
     return (
-      <View style={[styles.container, { backgroundColor: isLargeScreen ? 'transparent' : colors.background, justifyContent: 'center', alignItems: 'center', padding: 20 }]}>
-        <Lineicons icon={MonitorBulk} size={48} color={colors.mutedForeground} />
-        <Text style={{ color: colors.text, fontSize: 18, fontWeight: 'bold', marginTop: 12 }}>No playlist active</Text>
+      <View style={[styles.container, { backgroundColor: 'transparent', justifyContent: 'center', alignItems: 'center', padding: 20 , display: Platform.OS === 'web' && !isFocused ? 'none' : 'flex' }]}>
+        <Ionicons name="tv-outline" size={48} color={colors.mutedForeground} />
+        <Text style={{ color: colors.text, fontSize: 18, fontWeight: 'bold', marginTop: 12 }}>{t('no_playlist_active')}</Text>
         <TVFocusable
           style={{ marginTop: 16, backgroundColor: colors.gold, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 8 }}
           onPress={() => router.push('/playlists')}
         >
-          <Text style={{ color: '#1A1A1A', fontWeight: 'bold' }}>Manage Playlists</Text>
+          <Text style={{ color: '#1A1A1A', fontWeight: 'bold' }}>{t('manage_playlists')}</Text>
         </TVFocusable>
       </View>
     );
@@ -333,40 +351,35 @@ export default function HomeScreen() {
 
   // --- TV Layout ---
   if (isLargeScreen) {
-    const heroItem = featuredItems[0]; // Take the first featured item as the main hero
+    const heroItem = featuredItems[tvHeroIndex] || featuredItems[0]; // Use current slider item
 
     return (
-      <View style={[styles.container, { backgroundColor: '#000', opacity: isFocused ? 1 : 0, pointerEvents: isFocused ? 'auto' : 'none' }]}>
+      <View style={[styles.container, { backgroundColor: 'transparent' , display: Platform.OS === 'web' && !isFocused ? 'none' : 'flex' }]}>
         <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 60 }} showsVerticalScrollIndicator={false}>
           {loading ? (
             <HeroSkeleton />
           ) : heroItem ? (
-            <View style={{ width: '100%', height: height * 0.75 }}>
-              <Image source={heroItem.backdrop} style={StyleSheet.absoluteFill} contentFit="cover" />
+            <View nativeID="hero-carousel" style={{ width: width + 80, height: height * 0.7, marginLeft: -80, marginBottom: 40 }}>
+              <Image source={heroItem.backdrop} style={StyleSheet.absoluteFill} contentFit="cover" transition={500} />
               <LinearGradient
-                colors={['transparent', 'rgba(0,0,0,0.6)', '#000']}
-                locations={[0, 0.4, 1]}
+                colors={['transparent', 'rgba(0,0,0,0.4)', colors.overlay]}
+                locations={[0, 0.5, 1]}
                 style={StyleSheet.absoluteFill}
               />
               <LinearGradient
-                colors={['#000', 'transparent']}
+                colors={[colors.overlay, 'transparent']}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 0.5, y: 0 }}
                 style={StyleSheet.absoluteFill}
               />
-              <View style={[styles.tvHeroContent, { position: 'absolute', bottom: 120, left: 0 }]}>
+              {featuredItems.length > 1 && (
+                <>
+                </>
+              )}
+              <View style={[styles.tvHeroContent, { position: 'absolute', bottom: 80, left: 120 }]}>
                 <Text style={[styles.tvHeroSubtitle, { color: colors.gold }]}>{heroItem.subtitle}</Text>
                 <Text style={styles.tvHeroTitle} numberOfLines={1}>{heroItem.title}</Text>
-                <View style={styles.tvHeroMeta}>
-                  <Text style={styles.tvHeroMetaText}>{heroItem.year}</Text>
-                  <View style={styles.tvHeroDot} />
-                  <Text style={styles.tvHeroMetaText}>{heroItem.duration}</Text>
-                  <View style={styles.tvHeroDot} />
-                  <Text style={styles.tvHeroMetaText}>{heroItem.genres.join(', ')}</Text>
-                </View>
-                <Text style={styles.tvHeroDesc} numberOfLines={2}>{heroItem.description}</Text>
-
-                <View style={styles.tvHeroActions}>
+                <View style={[styles.tvHeroActions, { flexDirection: 'row', gap: 16 }]}>
                   <TVFocusable
                     style={({ focused }: any) => [
                       styles.tvHeroBtnPrimary,
@@ -376,31 +389,69 @@ export default function HomeScreen() {
                       if (heroItem.originalItem.type === 'live') {
                         router.push({ pathname: '/player', params: { streamUrl: heroItem.streamUrl || '', title: heroItem.title, isLive: 'true', quality: 'HD' } });
                       } else if (heroItem.originalItem.type === 'series') {
-                        router.push({ pathname: '/series-detail', params: { id: heroItem.id, title: heroItem.title, poster: heroItem.backdrop?.uri, backdrop: heroItem.backdrop?.uri, genres: heroItem.genres.join(','), description: heroItem.description, streamUrl: heroItem.streamUrl || '' } });
+                        router.push({ pathname: '/series-detail', params: { id: heroItem.id, title: heroItem.title, poster: heroItem.backdrop?.uri, backdrop: heroItem.backdrop?.uri, genres: heroItem.genres.join(','), description: heroItem.description, streamUrl: heroItem.streamUrl || '', autoPlay: 'true' } });
                       } else {
-                        router.push({ pathname: '/movie-detail', params: { id: heroItem.id, title: heroItem.title, poster: heroItem.backdrop?.uri, backdrop: heroItem.backdrop?.uri, quality: 'HD', genres: heroItem.genres.join(','), description: heroItem.description, streamUrl: heroItem.streamUrl || '' } });
+                        router.push({ pathname: '/player', params: { streamUrl: heroItem.streamUrl || '', title: heroItem.title, quality: 'HD', poster: heroItem.backdrop?.uri } });
                       }
                     }}
                     scaleAmount={1.05}
                   >
                     {({ focused }: any) => (
                       <>
-                        <Lineicons icon={PlayBulk} size={24} color="#000" />
-                        <Text style={[styles.tvHeroBtnPrimaryText, { color: '#000' }]}>Play Now</Text>
+                        <Ionicons name="play" size={20} color="#000" />
+                        <Text style={[styles.tvHeroBtnPrimaryText, { color: '#000' }]}>{t('play_now')}</Text>
                       </>
                     )}
                   </TVFocusable>
-
-
+                  
+                  {heroItem.originalItem.type !== 'live' && (
+                    <TVFocusable
+                      style={({ focused }: any) => [
+                        styles.tvHeroBtnPrimary,
+                        { backgroundColor: focused ? 'rgba(255,255,255,0.3)' : 'rgba(255,255,255,0.1)', borderWidth: 2, borderColor: focused ? '#FFF' : 'transparent' }
+                      ]}
+                      onPress={() => {
+                        if (heroItem.originalItem.type === 'series') {
+                          router.push({ pathname: '/series-detail', params: { id: heroItem.id, title: heroItem.title, poster: heroItem.backdrop?.uri, backdrop: heroItem.backdrop?.uri, genres: heroItem.genres.join(','), description: heroItem.description, streamUrl: heroItem.streamUrl || '' } });
+                        } else {
+                          router.push({ pathname: '/movie-detail', params: { id: heroItem.id, title: heroItem.title, poster: heroItem.backdrop?.uri, backdrop: heroItem.backdrop?.uri, quality: 'HD', genres: heroItem.genres.join(','), description: heroItem.description, streamUrl: heroItem.streamUrl || '' } });
+                        }
+                      }}
+                      scaleAmount={1.05}
+                    >
+                      {({ focused }: any) => (
+                        <>
+                          <Ionicons name="information-circle-outline" size={20} color="#FFF" />
+                          <Text style={[styles.tvHeroBtnPrimaryText, { color: '#FFF' }]}>More Info</Text>
+                        </>
+                      )}
+                    </TVFocusable>
+                  )}
                 </View>
+
+                {featuredItems.length > 1 && (
+                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 16 }}>
+                    {featuredItems.slice(0, 4).map((_, i) => (
+                      <View 
+                        key={i} 
+                        style={{ 
+                          width: i === tvHeroIndex ? 24 : 8, 
+                          height: 8, 
+                          borderRadius: 4, 
+                          backgroundColor: i === tvHeroIndex ? colors.gold : 'rgba(255,255,255,0.3)',
+                        }} 
+                      />
+                    ))}
+                  </View>
+                )}
               </View>
             </View>
           ) : null}
 
-          <View style={styles.tvBottomContent}>
+          <View style={[styles.tvBottomContent]}>
             {favoriteChannels.length > 0 && (
               <ContentRow
-                title="Favorite Channels"
+                title={t('favorite_channels')}
                 data={favoriteChannels}
                 onSeeAll={() => router.push('/(tabs)/favorites')}
                 renderItem={({ item, index: itemIndex }) => (
@@ -429,11 +480,12 @@ export default function HomeScreen() {
               />
             )}
             {continueWatching.length > 0 && (
-              <ContentRow
-                title="Continue Watching"
-                data={continueWatching}
-                onSeeAll={() => router.push('/continue-watching')}
-                renderItem={({ item }) => (
+              <View nativeID="tour-continue-watching" {...({ id: 'tour-continue-watching' } as any)}>
+                <ContentRow
+                  title={t('continue_watching')}
+                  data={continueWatching}
+                  onSeeAll={() => router.push('/continue-watching')}
+                  renderItem={({ item }) => (
                   <ContinueWatchingCard
                     item={item}
                     onPress={() => {
@@ -445,6 +497,7 @@ export default function HomeScreen() {
                   />
                 )}
               />
+              </View>
             )}
             {contentRows.map((row, index) => (
               <ContentRow
@@ -495,7 +548,7 @@ export default function HomeScreen() {
 
   // --- Mobile Layout ---
   return (
-    <View style={[styles.container, { backgroundColor: isLargeScreen ? 'transparent' : colors.background, opacity: isFocused ? 1 : 0, pointerEvents: isFocused ? 'auto' : 'none' }]}>
+    <View style={[styles.container, { backgroundColor: 'transparent' , display: Platform.OS === 'web' && !isFocused ? 'none' : 'flex' }]}>
       <ScrollView
         contentContainerStyle={{ paddingBottom: insets.bottom + 80 }}
         showsVerticalScrollIndicator={false}
@@ -509,27 +562,41 @@ export default function HomeScreen() {
         {loading ? (
           <HeroSkeleton />
         ) : featuredItems.length > 0 ? (
-          <HeroCarousel
-            items={featuredItems}
-            onPlay={(item) => {
-              if (item.subtitle.includes('LIVE')) {
-                router.push({ pathname: '/player', params: { streamUrl: item.streamUrl || '', title: item.title, isLive: 'true', quality: 'HD' } });
-              } else if (item.originalItem?.type === 'series') {
-                router.push({ pathname: '/series-detail', params: { id: item.id, title: item.title, poster: item.backdrop?.uri, backdrop: item.backdrop?.uri, genres: item.genres.join(','), description: item.description, streamUrl: item.streamUrl || '' } });
-              } else {
-                router.push({ pathname: '/movie-detail', params: { id: item.id, title: item.title, poster: item.backdrop?.uri, backdrop: item.backdrop?.uri, quality: 'HD', genres: item.genres.join(','), description: item.description, streamUrl: item.streamUrl || '' } });
-              }
-            }}
-            onInfo={(item) => {
-              if (item.subtitle.includes('LIVE')) {
-                router.push({ pathname: '/player', params: { streamUrl: item.streamUrl || '', title: item.title, isLive: 'true', current: item.description || '', quality: 'HD' } });
-              } else if (item.originalItem?.type === 'series') {
-                router.push({ pathname: '/series-detail', params: { id: item.id, title: item.title, poster: typeof item.backdrop === 'object' && 'uri' in item.backdrop ? item.backdrop.uri : '', backdrop: typeof item.backdrop === 'object' && 'uri' in item.backdrop ? item.backdrop.uri : '', genres: item.genres.join(','), description: item.description || '', streamUrl: item.streamUrl || '' } });
-              } else {
-                router.push({ pathname: '/movie-detail', params: { id: item.id, title: item.title, poster: typeof item.backdrop === 'object' && 'uri' in item.backdrop ? item.backdrop.uri : '', backdrop: typeof item.backdrop === 'object' && 'uri' in item.backdrop ? item.backdrop.uri : '', quality: 'HD', genres: item.genres.join(','), description: item.description || '', streamUrl: item.streamUrl || '' } });
-              }
-            }}
-          />
+          <View nativeID="hero-carousel">
+            <HeroCarousel
+              items={featuredItems}
+              onPlay={(hero: any) => {
+                const item = hero as any;
+                const isLive = item.type === 'live' ? 'true' : 'false';
+                router.push({
+                  pathname: '/player',
+                  params: {
+                    id: item.id,
+                    streamUrl: item.streamUrl || '',
+                    title: item.title,
+                    isLive,
+                    quality: item.quality,
+                    logo: item.poster?.uri || item.poster || '',
+                    category: item.category || ''
+                  }
+                });
+              }}
+              onInfo={(hero: any) => {
+                const item = hero as any;
+                if (item.type === 'series') {
+                  router.push({
+                    pathname: '/series-detail',
+                    params: { id: item.id, title: item.title, poster: item.poster?.uri || item.poster, backdrop: item.backdrop?.uri || item.backdrop, genres: item.category, description: item.description, streamUrl: item.streamUrl || '' },
+                  });
+                } else if (item.type === 'vod') {
+                  router.push({
+                    pathname: '/movie-detail',
+                    params: { id: item.id, title: item.title, poster: item.poster?.uri || item.poster, backdrop: item.backdrop?.uri || item.backdrop, quality: item.quality, genres: item.category, description: item.description, streamUrl: item.streamUrl || '' },
+                  });
+                }
+              }}
+            />
+          </View>
         ) : (
           <View style={{ height: 100 }} />
         )}
@@ -537,7 +604,7 @@ export default function HomeScreen() {
         <View style={styles.content}>
           {favoriteChannels.length > 0 && (
             <ContentRow
-              title="Favorite Channels"
+              title={t('favorite_channels')}
               data={favoriteChannels}
               onSeeAll={() => router.push('/(tabs)/favorites')}
               renderItem={({ item, index: itemIndex }) => (
@@ -566,13 +633,14 @@ export default function HomeScreen() {
             />
           )}
           {continueWatching.length > 0 && (
-            <ContentRow
-              title="Continue Watching"
-              data={continueWatching}
-              onSeeAll={() => router.push('/continue-watching')}
-              renderItem={({ item }) => (
-                <ContinueWatchingCard
-                  item={item}
+            <View nativeID="tour-continue-watching" {...({ id: 'tour-continue-watching' } as any)}>
+              <ContentRow
+                title={t('continue_watching')}
+                data={continueWatching}
+                onSeeAll={() => router.push('/continue-watching')}
+                renderItem={({ item }) => (
+                  <ContinueWatchingCard
+                    item={item}
                   onPress={() => {
                     router.push({
                       pathname: '/player',
@@ -593,6 +661,7 @@ export default function HomeScreen() {
                 />
               )}
             />
+            </View>
           )}
 
           {contentRows.map((row, index) => (
@@ -643,9 +712,9 @@ export default function HomeScreen() {
 
           {contentRows.length === 0 && (
             <View style={{ alignItems: 'center', padding: 40, gap: 12 }}>
-              <Lineicons icon={MonitorBulk} size={48} color={colors.mutedForeground} />
-              <Text style={{ color: colors.text, fontSize: 16, fontWeight: 'bold' }}>Playlist has no content</Text>
-              <Text style={{ color: colors.mutedForeground, textAlign: 'center' }}>Add another playlist or wait for update.</Text>
+              <Ionicons name="tv-outline" size={48} color={colors.mutedForeground} />
+              <Text style={{ color: colors.text, fontSize: 16, fontWeight: 'bold' }}>{t('playlist_no_content')}</Text>
+              <Text style={{ color: colors.mutedForeground, textAlign: 'center' }}>{t('add_playlist_wait')}</Text>
             </View>
           )}
         </View>
@@ -657,19 +726,19 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   // TV Styles
-  tvHeroContent: { paddingLeft: 32, paddingRight: 40, width: '60%', position: 'absolute', bottom: 120 },
+  tvHeroContent: { paddingLeft: 32, width: '60%', position: 'absolute', bottom: 80 },
   tvHeroSubtitle: { fontSize: 16, fontWeight: 'bold', letterSpacing: 2, marginBottom: 12 },
-  tvHeroTitle: { fontSize: 48, fontWeight: '900', color: '#FFF', textShadowColor: 'rgba(0,0,0,0.5)', textShadowOffset: { width: 0, height: 4 }, textShadowRadius: 10, marginBottom: 16 },
+  tvHeroTitle: { fontSize: 36, fontWeight: '900', color: '#FFF', textShadowColor: 'rgba(0,0,0,0.5)', textShadowOffset: { width: 0, height: 4 }, textShadowRadius: 10, marginBottom: 12 },
   tvHeroMeta: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 24 },
   tvHeroMetaText: { color: 'rgba(255,255,255,0.8)', fontSize: 16, fontWeight: '600' },
   tvHeroDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.5)' },
-  tvHeroDesc: { fontSize: 18, color: 'rgba(255,255,255,0.7)', lineHeight: 28, marginBottom: 40, maxWidth: '90%' },
+  tvHeroDesc: { fontSize: 16, color: 'rgba(255,255,255,0.7)', lineHeight: 24, marginBottom: 24, maxWidth: '90%' },
   tvHeroActions: { flexDirection: 'row', gap: 16 },
-  tvHeroBtnPrimary: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 32, paddingVertical: 16, borderRadius: 30 },
-  tvHeroBtnPrimaryText: { fontSize: 18, fontWeight: 'bold' },
+  tvHeroBtnPrimary: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 30 },
+  tvHeroBtnPrimaryText: { fontSize: 16, fontWeight: 'bold' },
   tvHeroBtnSecondary: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 32, paddingVertical: 16, borderRadius: 30, borderWidth: 2, borderColor: 'transparent' },
   tvHeroBtnSecondaryText: { color: '#FFF', fontSize: 18, fontWeight: 'bold' },
-  tvBottomContent: { paddingLeft: 32, paddingRight: 40, marginTop: -80 },
+  tvBottomContent: { paddingLeft: 24, marginTop: -32 },
 
   // Mobile Styles
   header: { position: 'absolute', zIndex: 10, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
