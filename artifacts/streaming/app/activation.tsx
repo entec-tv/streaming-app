@@ -20,8 +20,6 @@ if (__DEV__) {
   } else {
     SERVER_URL = Platform.OS === 'android' ? 'http://10.0.2.2:3000/api' : 'http://localhost:3000/api';
   }
-} else if (Platform.OS === 'web' && typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
-  SERVER_URL = 'http://localhost:3000/api';
 }
 
 export default function ActivationScreen() {

@@ -1554,14 +1554,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const deviceData = await getOrCreateDeviceData();
       let SERVER_URL = 'https://entecstreamingnestjs-production.up.railway.app/api';
       
-      if (Platform.OS === 'web' && typeof window !== 'undefined') {
-        if (window.location.hostname.includes('192.168')) {
-          const ip = window.location.host.split(':')[0];
-          SERVER_URL = `http://${ip}:3000/api`;
-        } else if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-          SERVER_URL = 'http://localhost:3000/api';
-        }
-      } else if (__DEV__) {
+      if (__DEV__) {
         SERVER_URL = Platform.OS === 'android' ? 'http://10.0.2.2:3000/api' : 'http://localhost:3000/api';
       }
 
@@ -1625,8 +1618,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         } else {
           SERVER_URL = Platform.OS === 'android' ? 'http://10.0.2.2:3000/api' : 'http://localhost:3000/api';
         }
-      } else if (Platform.OS === 'web' && typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
-        SERVER_URL = 'http://localhost:3000/api';
       }
 
       let isBackendAuthorized = false;
@@ -1784,9 +1775,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       } else {
         SERVER_URL = Platform.OS === 'android' ? 'http://10.0.2.2:3000/api' : 'http://localhost:3000/api';
       }
-    } else if (Platform.OS === 'web' && typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
-      SERVER_URL = 'http://localhost:3000/api';
-    }
+      }
 
     const sseUrl = `${SERVER_URL}/client/events?macAddress=${deviceId}`;
     
