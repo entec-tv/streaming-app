@@ -3,6 +3,10 @@ body {
   color: white;
 }
 
+*:focus {
+  outline: none !important;
+}
+
 :root {
   --theme-gold: rgba(212, 168, 67, 1);
   --theme-gold-dim: rgba(212, 168, 67, 0.5);

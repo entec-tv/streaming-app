@@ -36,7 +36,7 @@ function decodeIfNeeded(str?: string) {
   }
 }
 
-export const ContinueWatchingCard = React.memo(function ContinueWatchingCard({ item, onPress, width = 240 }: ContinueWatchingCardProps) {
+export const ContinueWatchingCard = React.memo(function ContinueWatchingCard({ item, onPress, width = 180 }: ContinueWatchingCardProps) {
   const colors = useColors();
 
   const isValidDuration = typeof item.duration === 'number' && !isNaN(item.duration) && item.duration > 0;
@@ -66,6 +66,8 @@ export const ContinueWatchingCard = React.memo(function ContinueWatchingCard({ i
             source={{ uri: imgSource }} 
             style={styles.poster} 
             contentFit="cover" 
+            cachePolicy="memory-disk"
+            transition={150}
             onError={() => {
               if (imgSource !== fallbackUrl) setImgSource(fallbackUrl);
             }}
@@ -90,10 +92,10 @@ export const ContinueWatchingCard = React.memo(function ContinueWatchingCard({ i
 const styles = StyleSheet.create({
   posterContainer: {
     aspectRatio: 16 / 9,
-    borderRadius: 12,
+    borderRadius: 10,
     overflow: 'hidden',
     backgroundColor: '#1A1A1A',
-    marginBottom: 8,
+    marginBottom: 6,
     position: 'relative',
   },
   poster: {
@@ -105,29 +107,29 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    padding: 12,
-    paddingTop: 32,
+    padding: 10,
+    paddingTop: 24,
     justifyContent: 'flex-end',
   },
   infoRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-end',
-    marginBottom: 8,
+    marginBottom: 6,
   },
   title: {
     color: '#FFF',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: 'bold',
     flex: 1,
-    marginRight: 8,
+    marginRight: 6,
   },
   time: {
     color: '#DDD',
-    fontSize: 12,
+    fontSize: 11,
   },
   progressContainer: {
-    height: 4,
+    height: 3,
     backgroundColor: 'rgba(255,255,255,0.2)',
     borderRadius: 2,
     overflow: 'hidden',

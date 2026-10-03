@@ -71,3 +71,15 @@ export function base64Decode(str: string): string {
     return result;
   }
 }
+
+export function decodeIfNeeded(str?: string): string {
+  if (!str) return '';
+  if (str.startsWith('http://') || str.startsWith('https://') || str.startsWith('data:') || str.startsWith('file://')) return str;
+  try {
+    const decoded = base64Decode(str);
+    if (decoded.startsWith('http://') || decoded.startsWith('https://')) return decoded;
+    return str;
+  } catch {
+    return str;
+  }
+}

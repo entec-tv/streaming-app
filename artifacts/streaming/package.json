@@ -59,13 +59,14 @@
     "zod-validation-error": "^3.4.0"
   },
   "dependencies": {
+    "@expo/ngrok": "^4.1.0",
     "@lineiconshq/free-icons": "^1.0.6",
     "@lineiconshq/react-native-lineicons": "^0.0.3",
     "@react-native-voice/voice": "^3.2.4",
-    "expo": "~54.0.35",
+    "expo": "^57.0.0",
     "expo-build-properties": "~1.0.10",
     "expo-clipboard": "^8.0.8",
-    "expo-file-system": "~19.0.23",
+    "expo-file-system": "~19.0.24",
     "expo-keep-awake": "~15.0.8",
     "expo-navigation-bar": "~5.0.10",
     "expo-screen-orientation": "~9.0.9",

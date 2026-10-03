@@ -32,7 +32,7 @@ export const ChannelCard = React.memo(function ChannelCard({
   const handlePress = React.useCallback((e: any) => {
     if (isNavigating.current) return;
     isNavigating.current = true;
-    if (onPress) onPress(e);
+    if (onPress) (onPress as any)(e);
     setTimeout(() => { isNavigating.current = false; }, 1000);
   }, [onPress]);
 
@@ -59,6 +59,8 @@ export const ChannelCard = React.memo(function ChannelCard({
               source={{ uri: imgSource }}
               style={styles.logo}
               contentFit="contain"
+              cachePolicy="memory-disk"
+              transition={150}
               onError={() => {
                 if (imgSource !== fallbackUrl) setImgSource(fallbackUrl);
               }}

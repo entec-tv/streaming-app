@@ -27,7 +27,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as FileSystem from 'expo-file-system/legacy';
 import { QualityBadge } from '@/components/QualityBadge';
 import { useAppStore } from '@/store/app-store';
-import { base64Decode, base64Encode } from '@/lib/base64';
+import { base64Decode, base64Encode, decodeIfNeeded } from '@/lib/base64';
 import { Channel } from '@/types';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -66,6 +66,7 @@ export default function MovieDetailScreen() {
   const toggleFavorite = useAppStore((s) => s.toggleFavorite);
   const downloads = useAppStore((s) => s.downloads);
   const startDownload = useAppStore((s) => s.startDownload);
+  const cancelDownload = useAppStore((s) => s.cancelDownload);
   const removeDownload = useAppStore((s) => s.removeDownload);
   const setPlaybackQueue = useAppStore((s) => s.setPlaybackQueue);
   const isChannelLocked = useAppStore((s) => s.isChannelLocked);
@@ -172,7 +173,7 @@ export default function MovieDetailScreen() {
 
   const movieBackdrop = fetchedBackdrop || params.backdrop || params.poster || '';
   const movieDescription = params.description || 'No description available for this title.';
-  const movieStreamUrl = params.streamUrl || '';
+  const movieStreamUrl = decodeIfNeeded(params.streamUrl || '');
   const movieGenres = params.genres ? params.genres.split(',') : ['VOD'];
   const movieQuality = params.quality || 'HD';
 
@@ -305,6 +306,13 @@ export default function MovieDetailScreen() {
       }
     }
 
+    const lowerPlayUrl = (urlToPlay || '').toLowerCase();
+    const isLiveStream = Boolean(lowerPlayUrl && (
+      lowerPlayUrl.includes('/live/') || 
+      lowerPlayUrl.endsWith('.ts') || 
+      lowerPlayUrl.includes('.ts?')
+    ));
+
     router.push({
       pathname: '/player',
       params: {
@@ -312,8 +320,8 @@ export default function MovieDetailScreen() {
         streamUrl: urlToPlay,
         title: movieTitle,
         quality: movieQuality,
-        isLive: 'false',
-        type: 'vod',
+        isLive: isLiveStream ? 'true' : 'false',
+        type: isLiveStream ? 'live' : 'vod',
         poster: base64Encode(moviePoster),
         backdrop: base64Encode(movieBackdrop),
         description: movieDescription,
@@ -324,6 +332,10 @@ export default function MovieDetailScreen() {
   };
 
   const handleDownload = async () => {
+    if (isDownloading) {
+      await cancelDownload(params.id || '');
+      return;
+    }
     if (isDownloaded && downloadedItem) {
       try {
         if (Platform.OS !== 'web') {
@@ -332,11 +344,10 @@ export default function MovieDetailScreen() {
       } catch (e) {
         console.error("Failed to delete", e);
       } finally {
-        removeDownload(params.id || '');
+        await cancelDownload(params.id || '');
       }
       return;
     }
-    if (isDownloading) return;
 
     startDownload({
       id: params.id || '',
@@ -458,12 +469,14 @@ export default function MovieDetailScreen() {
         <View style={[styles.heroSection, { height: Math.max(height * 0.70, 380) }]}>
           <Image source={{ uri: movieBackdrop || moviePoster }} style={StyleSheet.absoluteFill} contentFit="cover" />
           <LinearGradient
+            pointerEvents="none"
             colors={['rgba(0,0,0,0.5)', 'rgba(0,0,0,0.2)', 'transparent']}
             style={StyleSheet.absoluteFill}
             locations={[0, 0.5, 1]}
           />
           {/* Dark vignette sides */}
           <LinearGradient
+            pointerEvents="none"
             colors={isRTL ? ['rgba(0,0,0,0.5)', 'rgba(0,0,0,0.7)', 'rgba(0,0,0,0.95)'] : ['rgba(0,0,0,0.95)', 'rgba(0,0,0,0.7)', 'rgba(0,0,0,0.5)']}
             locations={[0, 0.5, 1]}
             start={{ x: 0, y: 0 }}
@@ -472,6 +485,7 @@ export default function MovieDetailScreen() {
           />
           {/* Bottom fade into background */}
           <LinearGradient
+            pointerEvents="none"
             colors={['transparent', colors.background]}
             style={StyleSheet.absoluteFill}
             locations={[0.6, 1]}
@@ -479,7 +493,8 @@ export default function MovieDetailScreen() {
 
           {/* Back button */}
           <TVFocusable
-            style={[styles.backBtn, { top: insets.top + 10, zIndex: 30 }, isRTL ? { right: 20, left: 'auto' } : { left: 20 }]}
+            hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
+            style={[styles.backBtn, { top: insets.top + 10, zIndex: 50, elevation: 10 }, isRTL ? { right: 20, left: 'auto' } : { left: 20 }]}
             onPress={() => {
               if (router.canGoBack()) {
                 router.back();
@@ -638,12 +653,15 @@ export default function MovieDetailScreen() {
               <Text style={styles.actionIconText}>{isChannelLocked(params.id || '') ? 'Locked' : 'Lock'}</Text>
             </TVFocusable>
 
-            <TVFocusable style={styles.actionIconBtn} onPress={handleDownload} disabled={isDownloading}>
-              <View style={styles.actionIconCircle}>
+            <TVFocusable style={styles.actionIconBtn} onPress={handleDownload}>
+              <View style={[styles.actionIconCircle, isDownloading && { borderColor: '#E50914', borderWidth: 1.5 }]}>
                 {isDownloading ? (
-                  <Text style={{ color: colors.gold, fontSize: 10, fontWeight: 'bold' }}>
-                    {Math.round(downloadProgress * 100)}%
-                  </Text>
+                  <View style={{ alignItems: 'center', justifyContent: 'center' }}>
+                    <Ionicons name="close" size={13} color="#E50914" style={{ position: 'absolute', top: -3, right: -5 }} />
+                    <Text style={{ color: colors.gold, fontSize: 10, fontWeight: 'bold' }}>
+                      {Math.round(downloadProgress * 100)}%
+                    </Text>
+                  </View>
                 ) : isDownloaded ? (
                   <Ionicons name="trash-outline" size={20} color={colors.primary} />
                 ) : (
@@ -651,7 +669,7 @@ export default function MovieDetailScreen() {
                 )}
               </View>
               <Text style={styles.actionIconText}>
-                {isDownloading ? 'Downloading' : isDownloaded ? 'Delete' : 'Download'}
+                {isDownloading ? (isRTL ? 'إلغاء' : 'Cancel') : isDownloaded ? (isRTL ? 'حذف' : 'Delete') : (isRTL ? 'تحميل' : 'Download')}
               </Text>
             </TVFocusable>
 

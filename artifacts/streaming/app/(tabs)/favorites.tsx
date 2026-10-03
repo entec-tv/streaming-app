@@ -28,7 +28,13 @@ export default function FavoritesScreen() {
 
 
   const handlePlayFav = (item: any) => {
-    if (item.type === 'live') {
+    const lowerStream = (item.streamUrl || '').toLowerCase();
+    const isLive = item.type === 'live' || Boolean(lowerStream && (
+      lowerStream.includes('/live/') || 
+      lowerStream.endsWith('.ts') || 
+      lowerStream.includes('.ts?')
+    ));
+    if (isLive) {
       router.push({
         pathname: '/player',
         params: {

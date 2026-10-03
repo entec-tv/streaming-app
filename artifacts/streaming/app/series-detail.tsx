@@ -60,6 +60,7 @@ function EpisodeItem({ ep, seriesTitle, seriesPoster, seriesBackdrop, seriesQual
   const colors = useColors();
   const downloads = useAppStore((s) => s.downloads);
   const startDownload = useAppStore((s) => s.startDownload);
+  const cancelDownload = useAppStore((s) => s.cancelDownload);
   const removeDownload = useAppStore((s) => s.removeDownload);
 
   const downloadedItem = downloads.find(d => d.id === ep.id);
@@ -68,16 +69,21 @@ function EpisodeItem({ ep, seriesTitle, seriesPoster, seriesBackdrop, seriesQual
   const progress = downloadedItem?.progress || 0;
 
   const handleDownload = async () => {
+    if (isDownloading) {
+      await cancelDownload(ep.id);
+      return;
+    }
     if (isDownloaded && downloadedItem) {
       try {
-        await FileSystem.deleteAsync(downloadedItem.localUri, { idempotent: true });
-        removeDownload(ep.id);
+        if (Platform.OS !== 'web') {
+          await FileSystem.deleteAsync(downloadedItem.localUri, { idempotent: true });
+        }
+        await cancelDownload(ep.id);
       } catch (e) {
         console.error("Failed to delete", e);
       }
       return;
     }
-    if (isDownloading) return;
     
     startDownload({
       id: ep.id,
@@ -106,11 +112,14 @@ function EpisodeItem({ ep, seriesTitle, seriesPoster, seriesBackdrop, seriesQual
         <Text style={[styles.epTitle, { color: colors.text }]} numberOfLines={1}>{ep.title}</Text>
         <Text style={[styles.epDuration, { color: colors.mutedForeground }]}>{ep.duration}</Text>
       </View>
-      <TVFocusable onPress={handleDownload} style={styles.epDownloadBtn} disabled={isDownloading}>
+      <TVFocusable onPress={handleDownload} style={[styles.epDownloadBtn, isDownloading && { borderColor: '#E50914', borderWidth: 1 }]}>
         {isDownloading ? (
-          <Text style={{ color: colors.gold, fontSize: 10, fontWeight: 'bold' }}>
-            {Math.round(progress * 100)}%
-          </Text>
+          <View style={{ alignItems: 'center', justifyContent: 'center' }}>
+            <Ionicons name="close" size={12} color="#E50914" style={{ position: 'absolute', top: -3, right: -5 }} />
+            <Text style={{ color: colors.gold, fontSize: 10, fontWeight: 'bold' }}>
+              {Math.round(progress * 100)}%
+            </Text>
+          </View>
         ) : isDownloaded ? (
           <Lineicons icon={CheckCircle1Bulk} size={20} color={colors.primary} />
         ) : (
@@ -152,6 +161,7 @@ export default function SeriesDetailScreen() {
 
   const [loading, setLoading] = useState(true);
   const [episodes, setEpisodes] = useState<Episode[]>([]);
+  const [selectedSeason, setSelectedSeason] = useState<number | null>(null);
   const [seasonsCount, setSeasonsCount] = useState(1);
   const [seriesInfo, setSeriesInfo] = useState<any>(null);
   const [actors, setActors] = useState<any[]>([]);
@@ -160,6 +170,39 @@ export default function SeriesDetailScreen() {
   const [recommendations, setRecommendations] = useState<any[]>([]);
   const [moreRecommendations, setMoreRecommendations] = useState<any[]>([]);
   const [actorsImages, setActorsImages] = useState<Record<string, string>>({});
+
+  const availableSeasons = React.useMemo(() => {
+    const set = new Set<number>();
+    episodes.forEach((ep) => {
+      if (typeof ep.season === 'number' && !isNaN(ep.season)) {
+        set.add(ep.season);
+      }
+    });
+    return Array.from(set).sort((a, b) => a - b);
+  }, [episodes]);
+
+  const seasonEpisodeCounts = React.useMemo(() => {
+    const map = new Map<number, number>();
+    episodes.forEach((ep) => {
+      map.set(ep.season, (map.get(ep.season) || 0) + 1);
+    });
+    return map;
+  }, [episodes]);
+
+  React.useEffect(() => {
+    if (availableSeasons.length > 0) {
+      if (selectedSeason === null || !availableSeasons.includes(selectedSeason)) {
+        setSelectedSeason(availableSeasons[0]);
+      }
+    } else {
+      setSelectedSeason(null);
+    }
+  }, [availableSeasons]);
+
+  const filteredEpisodes = React.useMemo(() => {
+    if (selectedSeason === null) return episodes;
+    return episodes.filter((ep) => ep.season === selectedSeason);
+  }, [episodes, selectedSeason]);
 
   const scrollViewRef = React.useRef<ScrollView>(null);
 
@@ -347,9 +390,11 @@ export default function SeriesDetailScreen() {
               const xhr = new XMLHttpRequest();
               xhr.open('GET', u, true);
               xhr.timeout = 20000;
-              try {
-                xhr.setRequestHeader('User-Agent', 'TiviMate/4.7.0');
-              } catch (_) {}
+              if (Platform.OS !== 'web') {
+                try {
+                  xhr.setRequestHeader('User-Agent', 'TiviMate/4.7.0');
+                } catch (_) {}
+              }
               xhr.onload = () => {
                 if (xhr.status >= 200 && xhr.status < 300) {
                   if (xhr.responseText && xhr.responseText.trim().length > 0) resolve(xhr.responseText);
@@ -471,7 +516,8 @@ export default function SeriesDetailScreen() {
   };
 
   const executeWatchFirst = () => {
-    const ep = episodes[0];
+    const ep = filteredEpisodes.length > 0 ? filteredEpisodes[0] : episodes[0];
+    if (!ep) return;
     router.push({
       pathname: '/player',
       params: {
@@ -601,12 +647,14 @@ const description = seriesInfo?.plot || seriesDescription;
         <View style={[styles.heroSection, { height: Math.max(height * 0.70, 350) }]}>
           <Image source={{ uri: seriesBackdrop || seriesPoster }} style={StyleSheet.absoluteFill} contentFit="cover" />
           <LinearGradient
+            pointerEvents="none"
             colors={['rgba(0,0,0,0.5)', 'rgba(0,0,0,0.2)', 'transparent']}
             style={StyleSheet.absoluteFill}
             locations={[0, 0.5, 1]}
           />
           {/* Dark vignette sides */}
           <LinearGradient
+            pointerEvents="none"
             colors={isRTL ? ['rgba(0,0,0,0.5)', 'rgba(0,0,0,0.7)', 'rgba(0,0,0,0.95)'] : ['rgba(0,0,0,0.95)', 'rgba(0,0,0,0.7)', 'rgba(0,0,0,0.5)']}
             locations={[0, 0.5, 1]}
             start={{ x: 0, y: 0 }}
@@ -615,12 +663,14 @@ const description = seriesInfo?.plot || seriesDescription;
           />
           {/* Bottom fade into background */}
           <LinearGradient
+            pointerEvents="none"
             colors={['transparent', colors.background]}
             style={StyleSheet.absoluteFill}
             locations={[0.6, 1]}
           />
           <TVFocusable 
-            style={[styles.backBtn, { top: insets.top + 10 }]} 
+            hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
+            style={[styles.backBtn, { top: insets.top + 10, zIndex: 50, elevation: 10 }, isRTL ? { right: 20, left: 'auto' } : { left: 20 }]}
             onPress={() => {
               if (router.canGoBack()) {
                 router.back();
@@ -691,8 +741,12 @@ const description = seriesInfo?.plot || seriesDescription;
                   </Text>
                 </View>
                 <Text style={[styles.metaRowText, { color: '#CCC', marginBottom: 0 }]}>{year}</Text>
-                <Text style={[styles.metaRowText, { color: '#CCC', marginBottom: 0 }]}>{seasonsCount} {seasonsCount === 1 ? 'Season' : 'Seasons'}</Text>
-                <Text style={[styles.metaRowText, { color: '#CCC', marginBottom: 0 }]}>{episodes.length} Episodes</Text>
+                <Text style={[styles.metaRowText, { color: '#CCC', marginBottom: 0 }]}>
+                  {availableSeasons.length || seasonsCount || 1} {((availableSeasons.length || seasonsCount || 1) === 1) ? t('season') : t('seasons')}
+                </Text>
+                <Text style={[styles.metaRowText, { color: '#CCC', marginBottom: 0 }]}>
+                  {episodes.length} {isRTL ? 'حلقة' : 'Episodes'}
+                </Text>
                 <Text style={[styles.metaRowText, { color: '#CCC', marginBottom: 0 }]}>{seriesGenres.slice(0, 2).join(' | ')}</Text>
               </View>
 
@@ -713,7 +767,7 @@ const description = seriesInfo?.plot || seriesDescription;
                   hasTVPreferredFocus={true}
                 >
                   <Lineicons icon={PlayBulk} size={22} color="#1A1A1A" />
-                  <Text style={[styles.playPillText, { flexShrink: 1 }]} numberOfLines={1}>Watch Now</Text>
+                  <Text style={[styles.playPillText, { flexShrink: 1 }]} numberOfLines={1}>{t('watch_now')}</Text>
                 </TVFocusable>
               </LinearGradient>
             </View>
@@ -721,7 +775,7 @@ const description = seriesInfo?.plot || seriesDescription;
         </View>
 
         <View style={styles.content}>
-          <Text style={[styles.sectionHeading, { color: colors.text }]}>Season {episodes.length > 0 ? episodes[0].season : 1}</Text>
+          <Text style={[styles.sectionHeading, { color: colors.text }]}>{t('overview')}</Text>
           <Text style={[styles.description, { color: '#DDD' }]}>{description}</Text>
           
           {!loading && actors.length > 0 && (
@@ -785,15 +839,127 @@ const description = seriesInfo?.plot || seriesDescription;
           {loading ? (
             <View style={{ paddingVertical: 40, alignItems: 'center', justifyContent: 'center' }}>
               <ActivityIndicator size="large" color={colors.gold} />
-              <Text style={{ color: colors.mutedForeground, marginTop: 12 }}>Syncing episodes...</Text>
+              <Text style={{ color: colors.mutedForeground, marginTop: 12 }}>{t('syncing_episodes')}</Text>
             </View>
           ) : (
             <>
+              {/* Seasons Selector Header and Tabs */}
+              {availableSeasons.length > 0 && (
+                <View style={styles.seasonsContainer}>
+                  <View style={styles.seasonsHeader}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <Ionicons name="film" size={20} color={colors.gold} />
+                      <Text style={[styles.sectionTitle, { color: colors.text, marginBottom: 0 }]}>
+                        {t('episodes_title')}
+                      </Text>
+                    </View>
+                    <View style={[styles.seasonBadgeTotal, { backgroundColor: 'rgba(212, 168, 67, 0.12)', borderColor: 'rgba(212, 168, 67, 0.3)' }]}>
+                      <Text style={[styles.seasonBadgeTotalText, { color: colors.gold }]}>
+                        {selectedSeason !== null
+                          ? (isRTL ? `${t('season')} ${selectedSeason} · ${filteredEpisodes.length} حلقة` : `${t('season')} ${selectedSeason} · ${filteredEpisodes.length} Eps`)
+                          : (isRTL ? `${filteredEpisodes.length} حلقة` : `${filteredEpisodes.length} Eps`)}
+                      </Text>
+                    </View>
+                  </View>
 
-              <Text style={[styles.sectionTitle, { color: colors.text, marginTop: 16 }]}>Episodes ({episodes.length})</Text>
-              
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.seasonsList}
+                  >
+                    {availableSeasons.map((seasonNum) => {
+                      const isSelected = selectedSeason === seasonNum;
+                      const count = seasonEpisodeCounts.get(seasonNum) || 0;
+                      return (
+                        <TVFocusable
+                          key={`season_btn_${seasonNum}`}
+                          style={[
+                            styles.seasonTab,
+                            {
+                              backgroundColor: isSelected ? 'rgba(212, 168, 67, 0.22)' : colors.surface,
+                              borderColor: isSelected ? colors.gold : colors.border,
+                            },
+                            isSelected && styles.seasonTabActive
+                          ]}
+                          onPress={() => setSelectedSeason(seasonNum)}
+                          scaleAmount={1.05}
+                          focusedBorderColor={colors.gold}
+                          borderThickness={2}
+                        >
+                          <Ionicons 
+                            name={isSelected ? "play-circle" : "layers-outline"} 
+                            size={16} 
+                            color={isSelected ? colors.gold : colors.mutedForeground} 
+                          />
+                          <Text style={[
+                            styles.seasonTabText,
+                            { color: isSelected ? colors.gold : colors.text },
+                            isSelected && { fontWeight: 'bold' }
+                          ]}>
+                            {`${t('season')} ${seasonNum}`}
+                          </Text>
+                          <View style={[
+                            styles.seasonCountPill,
+                            { backgroundColor: isSelected ? colors.gold : 'rgba(255, 255, 255, 0.08)' }
+                          ]}>
+                            <Text style={[
+                              styles.seasonCountPillText,
+                              { color: isSelected ? '#1A1A1A' : colors.mutedForeground }
+                            ]}>
+                              {count}
+                            </Text>
+                          </View>
+                        </TVFocusable>
+                      );
+                    })}
+
+                    {availableSeasons.length > 1 && (
+                      <TVFocusable
+                        key="season_btn_all"
+                        style={[
+                          styles.seasonTab,
+                          {
+                            backgroundColor: selectedSeason === null ? 'rgba(212, 168, 67, 0.22)' : colors.surface,
+                            borderColor: selectedSeason === null ? colors.gold : colors.border,
+                          },
+                          selectedSeason === null && styles.seasonTabActive
+                        ]}
+                        onPress={() => setSelectedSeason(null)}
+                        scaleAmount={1.05}
+                        focusedBorderColor={colors.gold}
+                        borderThickness={2}
+                      >
+                        <Ionicons 
+                          name={selectedSeason === null ? "albums" : "albums-outline"} 
+                          size={16} 
+                          color={selectedSeason === null ? colors.gold : colors.mutedForeground} 
+                        />
+                        <Text style={[
+                          styles.seasonTabText,
+                          { color: selectedSeason === null ? colors.gold : colors.text },
+                          selectedSeason === null && { fontWeight: 'bold' }
+                        ]}>
+                          {t('all_seasons')}
+                        </Text>
+                        <View style={[
+                          styles.seasonCountPill,
+                          { backgroundColor: selectedSeason === null ? colors.gold : 'rgba(255, 255, 255, 0.08)' }
+                        ]}>
+                          <Text style={[
+                            styles.seasonCountPillText,
+                            { color: selectedSeason === null ? '#1A1A1A' : colors.mutedForeground }
+                          ]}>
+                            {episodes.length}
+                          </Text>
+                        </View>
+                      </TVFocusable>
+                    )}
+                  </ScrollView>
+                </View>
+              )}
+
               <View style={styles.episodesList}>
-                {episodes.map(ep => (
+                {filteredEpisodes.map(ep => (
                   <EpisodeItem 
                     key={ep.id}
                     ep={ep}
@@ -806,10 +972,13 @@ const description = seriesInfo?.plot || seriesDescription;
                   />
                 ))}
                 
-                {episodes.length === 0 && (
-                  <Text style={{ color: colors.mutedForeground, textAlign: 'center', marginVertical: 20 }}>
-                    No episodes available for this series.
-                  </Text>
+                {filteredEpisodes.length === 0 && (
+                  <View style={styles.emptyEpisodesContainer}>
+                    <Ionicons name="film-outline" size={40} color={colors.mutedForeground} />
+                    <Text style={{ color: colors.mutedForeground, textAlign: 'center', marginTop: 8 }}>
+                      {t('no_episodes_for_season')}
+                    </Text>
+                  </View>
                 )}
               </View>
             </>
@@ -1125,5 +1294,65 @@ const styles = StyleSheet.create({
   similarImage: {
     width: '100%',
     height: '100%',
+  },
+  seasonsContainer: {
+    marginTop: 16,
+    marginBottom: 16,
+  },
+  seasonsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  seasonBadgeTotal: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  seasonBadgeTotalText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  seasonsList: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 4,
+    paddingHorizontal: 2,
+  },
+  seasonTab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  seasonTabActive: {
+    borderWidth: 1.5,
+  },
+  seasonTabText: {
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  seasonCountPill: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 10,
+    minWidth: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  seasonCountPillText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  emptyEpisodesContainer: {
+    paddingVertical: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
   }
 });

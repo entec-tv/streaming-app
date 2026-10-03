@@ -8,7 +8,10 @@
     "typecheck:libs": "tsc --build",
     "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
     "android": "expo run:android",
-    "ios": "expo run:ios"
+    "ios": "expo run:ios",
+    "windows": "npm --prefix windows-app start",
+    "windows:dev": "npm --prefix windows-app run dev",
+    "windows:build": "npm --prefix windows-app run build"
   },
   "private": true,
   "devDependencies": {

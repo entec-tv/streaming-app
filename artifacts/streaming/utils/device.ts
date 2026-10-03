@@ -35,7 +35,13 @@ function generateDeviceKey() {
   return Math.floor(100000 + Math.random() * 900000).toString(); // 6 digits
 }
 
+let inMemoryDeviceData: { macAddress: string; deviceKey: string } | null = null;
+
 export async function getOrCreateDeviceData() {
+  if (inMemoryDeviceData) {
+    return inMemoryDeviceData;
+  }
+
   try {
     let mac = await AsyncStorage.getItem(MAC_KEY);
     let key = await AsyncStorage.getItem(DEVICE_KEY_KEY);
@@ -47,7 +53,8 @@ export async function getOrCreateDeviceData() {
       await AsyncStorage.setItem(DEVICE_KEY_KEY, key);
     }
 
-    return { macAddress: mac, deviceKey: key };
+    inMemoryDeviceData = { macAddress: mac, deviceKey: key };
+    return inMemoryDeviceData;
   } catch (error) {
     console.error('Error getting device data', error);
     return { macAddress: '00:00:00:00:00:00', deviceKey: '123456' };

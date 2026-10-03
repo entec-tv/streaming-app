@@ -1,0 +1,9 @@
+{
+  "name": "windows-app-alias",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "npm --prefix ../../windows-app start",
+    "dev": "npm --prefix ../../windows-app run dev"
+  }
+}

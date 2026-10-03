@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useColors } from '@/hooks/useColors';
 import { useTranslation } from '@/hooks/useTranslation';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 
 import { HeroCarousel } from '@/components/HeroCarousel';
@@ -24,7 +25,7 @@ import { useIsFocused } from '@react-navigation/native';
 export default function HomeScreen() {
   const isFocused = useIsFocused();
   const colors = useColors();
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
   const isLargeScreen = width >= 1024 || Platform.isTV;
@@ -36,6 +37,7 @@ export default function HomeScreen() {
   const playlists = useAppStore((s) => s.playlists);
   const cachedHomeContent = useAppStore((s) => s.cachedHomeContent);
   const setCachedHomeContent = useAppStore((s) => s.setCachedHomeContent);
+  const refreshCounter = useAppStore((s) => s.refreshCounter);
 
   const [loading, setLoading] = useState(true);
   const [contentRows, setContentRows] = useState<{ title: string; type: 'live' | 'vod' | 'series'; categoryId: string; items: any[] }[]>([]);
@@ -58,6 +60,7 @@ export default function HomeScreen() {
   const appIsReady = useAppStore((s) => s.appIsReady);
 
   const continueWatching = useAppStore((s) => s.continueWatching) || [];
+  const downloads = useAppStore((s) => s.downloads) || [];
   const favoriteItems = useAppStore((s) => s.favoriteItems) || [];
   const favoriteChannels = favoriteItems.filter((item) => item.type === 'live' || item.isLive === true || (item.isLive as unknown) === 'true');
   const [refreshKey, setRefreshKey] = useState(0);
@@ -73,7 +76,23 @@ export default function HomeScreen() {
     let active = true;
 
     async function loadHomeContent() {
-      if (!activePlaylistId || !activeCategories) {
+      if (!activePlaylistId) {
+        setLoading(false);
+        return;
+      }
+
+      let currentCategories = activeCategories;
+      if (!currentCategories) {
+        try {
+          const cached = await AsyncStorage.getItem(`categories_${activePlaylistId}`);
+          if (cached) {
+            currentCategories = JSON.parse(cached);
+            useAppStore.setState({ activeCategories: currentCategories });
+          }
+        } catch (e) {}
+      }
+
+      if (!currentCategories) {
         setLoading(false);
         return;
       }
@@ -105,32 +124,6 @@ export default function HomeScreen() {
           } else {
             const match = activePlaylist.url.match(/^(https?:\/\/[^/]+)\/get\.php\?username=([^&]+)&password=([^&]+)/);
             if (match) config = { host: match[1], username: match[2], password: match[3] };
-          }
-          if (config) {
-            try {
-              // Quick check for expired subscription to avoid infinite loading loop
-              const authRes = await Promise.race([
-                fetch(`${config.host}/player_api.php?username=${config.username}&password=${config.password}`, {
-                  headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                  }
-                }),
-                new Promise((_, r) => setTimeout(() => r(new Error('timeout')), 5000))
-              ]) as Response;
-
-              if (authRes.ok) {
-                const data = await authRes.json();
-                if (data && data.user_info && data.user_info.status !== 'Active') {
-                  if (active) {
-                    setSubscriptionExpired(true);
-                    setLoading(false);
-                  }
-                  return;
-                }
-              }
-            } catch (err) {
-              console.warn('Auth check failed or timed out, proceeding with stream fetch...', err);
-            }
           }
         }
 
@@ -173,6 +166,7 @@ export default function HomeScreen() {
             };
             if (active) {
               accumulatedRows.push(newRow);
+              setContentRows([...accumulatedRows]);
             }
             return true;
           }
@@ -190,27 +184,19 @@ export default function HomeScreen() {
             if (added) {
               count++;
               rowCount++;
-              // Removed 400ms delay for faster loading (since we now have caching)
             }
           }
         };
 
-        // Shuffle categories to get dynamic rows and diverse hero pool on every load
-        const shuffledSeries = [...(activeCategories.series || [])].sort(() => 0.5 - Math.random());
-        const shuffledVod = [...(activeCategories.vod || [])].sort(() => 0.5 - Math.random());
-        const shuffledLive = [...(activeCategories.live || [])].sort(() => 0.5 - Math.random());
-
-        // Load series, vod, and live rows in parallel to speed up home screen loading
-        await Promise.all([
-          fillRows('series', shuffledSeries, 2),
-          fillRows('vod', shuffledVod, 2),
-          fillRows('live', shuffledLive, 2),
-        ]);
+        // Load categories sequentially to prevent concurrent request flooding on IPTV server
+        await fillRows('live', currentCategories.live || [], 2);
+        if (active) await fillRows('vod', currentCategories.vod || [], 2);
+        if (active) await fillRows('series', currentCategories.series || [], 2);
 
         if (!active) return;
 
         let priorityHeroItems: Channel[] = [];
-        const arabicNowSeriesCategory = activeCategories.series?.find(c => c.name.includes('يعرض الآن عربي'));
+        const arabicNowSeriesCategory = currentCategories.series?.find(c => c.name.includes('يعرض الآن عربي'));
         const isNotUpcoming = (i: any) => {
           const name = i.name || '';
           const nameLower = name.toLowerCase();
@@ -237,12 +223,13 @@ export default function HomeScreen() {
           if (item.type === 'series' && config && item.id.startsWith('xt_series_')) {
             try {
               const seriesId = item.id.replace('xt_series_', '');
-              const fetchUrl = `${config.host}/player_api.php?username=${config.username}&password=${config.password}&action=get_series_info&series_id=${seriesId}`;
+              const hostClean = (config.host || '').endsWith('/') ? config.host.slice(0, -1) : (config.host || '');
+              const fetchUrl = `${hostClean}/player_api.php?username=${config.username}&password=${config.password}&action=get_series_info&series_id=${seriesId}`;
 
               const text = await new Promise<string>((resolve, reject) => {
                 const xhr = new XMLHttpRequest();
                 xhr.open('GET', fetchUrl, true);
-                xhr.timeout = 10000;
+                xhr.timeout = 4000;
                 xhr.onload = () => {
                   if (xhr.status >= 200 && xhr.status < 300) resolve(xhr.responseText || '');
                   else reject(new Error('error'));
@@ -297,12 +284,12 @@ export default function HomeScreen() {
           hasAutoPlayed.current = true;
           const last = useAppStore.getState().lastWatchedChannel;
           if (last && last.type === 'live') {
-             router.push(`/live/player?id=${encodeURIComponent(last.id)}&title=${encodeURIComponent(last.title)}&url=${encodeURIComponent(last.streamUrl)}` as any);
+             router.push({ pathname: '/player', params: { id: last.id, title: last.title, streamUrl: last.streamUrl, isLive: 'true' } });
           } else {
              const liveRow = accumulatedRows.find(r => r.type === 'live');
              if (liveRow && liveRow.items.length > 0) {
                 const item = liveRow.items[0];
-                router.push(`/live/player?id=${encodeURIComponent(item.id)}&title=${encodeURIComponent(item.title)}&url=${encodeURIComponent(item.streamUrl)}` as any);
+                router.push({ pathname: '/player', params: { id: item.id, title: item.title, streamUrl: item.streamUrl, isLive: 'true' } });
              }
           }
         }
@@ -322,21 +309,13 @@ export default function HomeScreen() {
     return () => {
       active = false;
     };
-  }, [activePlaylistId, activeCategories, refreshKey]);
-
-  useEffect(() => {
-    if (subscriptionExpired) {
-      console.log('LOGOUT TRIGGERED FROM INDEX.TSX');
-      useAppStore.getState().logout();
-      router.replace('/activation');
-    }
-  }, [subscriptionExpired]);
+  }, [activePlaylistId, activeCategories, refreshKey, refreshCounter, language]);
 
 
 
   if (!activePlaylistId) {
     return (
-      <View style={[styles.container, { backgroundColor: 'transparent', justifyContent: 'center', alignItems: 'center', padding: 20 , display: Platform.OS === 'web' && !isFocused ? 'none' : 'flex' }]}>
+      <View style={[styles.container, { backgroundColor: '#05070a', justifyContent: 'center', alignItems: 'center', padding: 20 , display: Platform.OS === 'web' && !isFocused ? 'none' : 'flex' }]}>
         <Ionicons name="tv-outline" size={48} color={colors.mutedForeground} />
         <Text style={{ color: colors.text, fontSize: 18, fontWeight: 'bold', marginTop: 12 }}>{t('no_playlist_active')}</Text>
         <TVFocusable
@@ -354,32 +333,38 @@ export default function HomeScreen() {
     const heroItem = featuredItems[tvHeroIndex] || featuredItems[0]; // Use current slider item
 
     return (
-      <View style={[styles.container, { backgroundColor: 'transparent' , display: Platform.OS === 'web' && !isFocused ? 'none' : 'flex' }]}>
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 60 }} showsVerticalScrollIndicator={false}>
+      <View key={`home-tv-${language}`} style={[styles.container, { backgroundColor: '#05070a' , display: Platform.OS === 'web' && !isFocused ? 'none' : 'flex' }]}>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 60 }} showsVerticalScrollIndicator={false} data-focus-zone="home-content">
           {loading ? (
             <HeroSkeleton />
           ) : heroItem ? (
-            <View nativeID="hero-carousel" style={{ width: width + 80, height: height * 0.7, marginLeft: -80, marginBottom: 40 }}>
-              <Image source={heroItem.backdrop} style={StyleSheet.absoluteFill} contentFit="cover" transition={500} />
+            <View nativeID="hero-carousel" style={{ width: width + 80, height: Math.min(Math.round(height * 0.54), 520), marginLeft: -80, marginBottom: 0 }}>
+              <Image 
+                source={heroItem.backdrop} 
+                style={StyleSheet.absoluteFill} 
+                contentFit="cover" 
+                contentPosition="top"
+                transition={500} 
+              />
               <LinearGradient
-                colors={['transparent', 'rgba(0,0,0,0.4)', colors.overlay]}
-                locations={[0, 0.5, 1]}
+                colors={['transparent', 'rgba(5,7,10,0.2)', 'rgba(5,7,10,0.85)', '#05070a']}
+                locations={[0, 0.45, 0.8, 1]}
                 style={StyleSheet.absoluteFill}
               />
               <LinearGradient
-                colors={[colors.overlay, 'transparent']}
+                colors={['rgba(5,7,10,0.9)', 'rgba(5,7,10,0.5)', 'transparent']}
                 start={{ x: 0, y: 0 }}
-                end={{ x: 0.5, y: 0 }}
+                end={{ x: 0.65, y: 0 }}
                 style={StyleSheet.absoluteFill}
               />
               {featuredItems.length > 1 && (
                 <>
                 </>
               )}
-              <View style={[styles.tvHeroContent, { position: 'absolute', bottom: 80, left: 120 }]}>
-                <Text style={[styles.tvHeroSubtitle, { color: colors.gold }]}>{heroItem.subtitle}</Text>
-                <Text style={styles.tvHeroTitle} numberOfLines={1}>{heroItem.title}</Text>
-                <View style={[styles.tvHeroActions, { flexDirection: 'row', gap: 16 }]}>
+              <View style={[styles.tvHeroContent, { position: 'absolute', bottom: 42, left: 100, alignItems: 'flex-start' }]}>
+                <Text style={[styles.tvHeroSubtitle, { color: colors.gold, textAlign: 'left', alignSelf: 'flex-start' }]}>{heroItem.subtitle}</Text>
+                <Text style={[styles.tvHeroTitle, { textAlign: 'left', alignSelf: 'flex-start' }]} numberOfLines={1}>{heroItem.title}</Text>
+                <View style={[styles.tvHeroActions, { flexDirection: 'row', gap: 12 }]}>
                   <TVFocusable
                     style={({ focused }: any) => [
                       styles.tvHeroBtnPrimary,
@@ -398,7 +383,7 @@ export default function HomeScreen() {
                   >
                     {({ focused }: any) => (
                       <>
-                        <Ionicons name="play" size={20} color="#000" />
+                        <Ionicons name="play" size={16} color="#000" />
                         <Text style={[styles.tvHeroBtnPrimaryText, { color: '#000' }]}>{t('play_now')}</Text>
                       </>
                     )}
@@ -421,8 +406,8 @@ export default function HomeScreen() {
                     >
                       {({ focused }: any) => (
                         <>
-                          <Ionicons name="information-circle-outline" size={20} color="#FFF" />
-                          <Text style={[styles.tvHeroBtnPrimaryText, { color: '#FFF' }]}>More Info</Text>
+                          <Ionicons name="information-circle-outline" size={16} color="#FFF" />
+                          <Text style={[styles.tvHeroBtnPrimaryText, { color: '#FFF' }]}>{t('more_info')}</Text>
                         </>
                       )}
                     </TVFocusable>
@@ -430,14 +415,14 @@ export default function HomeScreen() {
                 </View>
 
                 {featuredItems.length > 1 && (
-                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 16 }}>
+                  <View style={{ flexDirection: 'row', gap: 6, marginTop: 10 }}>
                     {featuredItems.slice(0, 4).map((_, i) => (
                       <View 
                         key={i} 
                         style={{ 
-                          width: i === tvHeroIndex ? 24 : 8, 
-                          height: 8, 
-                          borderRadius: 4, 
+                          width: i === tvHeroIndex ? 18 : 6, 
+                          height: 6, 
+                          borderRadius: 3, 
                           backgroundColor: i === tvHeroIndex ? colors.gold : 'rgba(255,255,255,0.3)',
                         }} 
                       />
@@ -457,7 +442,7 @@ export default function HomeScreen() {
                 renderItem={({ item, index: itemIndex }) => (
                   <ChannelCard
                     channel={item}
-                    width={200}
+                    width={150}
                     onPress={() => {
                       setPlaybackQueue(favoriteChannels, itemIndex);
                       router.push({
@@ -488,15 +473,73 @@ export default function HomeScreen() {
                   renderItem={({ item }) => (
                   <ContinueWatchingCard
                     item={item}
+                    width={180}
                     onPress={() => {
+                      const lowerStream = (item.streamUrl || '').toLowerCase();
+                      const isLiveStream = item.type === 'live' || Boolean(lowerStream && (
+                        lowerStream.includes('/live/') || 
+                        lowerStream.endsWith('.ts') || 
+                        lowerStream.includes('.ts?')
+                      ));
                       router.push({
                         pathname: '/player',
-                        params: { id: item.id, streamUrl: item.streamUrl, title: item.title, isLive: item.type === 'live' ? 'true' : 'false', current: item.current || '', next: item.next || '', quality: item.quality, logo: item.poster || item.backdrop || '', category: item.category || '', autoResume: 'true' }
+                        params: { 
+                          id: item.id, 
+                          streamUrl: item.streamUrl, 
+                          title: item.title, 
+                          isLive: isLiveStream ? 'true' : 'false', 
+                          current: item.current || '', 
+                          next: item.next || '', 
+                          quality: item.quality, 
+                          logo: item.poster || item.backdrop || '', 
+                          category: item.category || '', 
+                          autoResume: isLiveStream ? 'false' : 'true' 
+                        }
                       });
                     }}
                   />
                 )}
               />
+              </View>
+            )}
+            {downloads.length > 0 && (
+              <View nativeID="tour-downloads" {...({ id: 'tour-downloads' } as any)}>
+                <ContentRow
+                  title={t('my_downloads')}
+                  data={downloads}
+                  onSeeAll={() => router.push('/downloads')}
+                  renderItem={({ item }) => (
+                    <ContinueWatchingCard
+                      item={{
+                        ...item,
+                        type: (item.type === 'series' ? 'series' : 'vod') as any,
+                        duration: 1,
+                        progress: item.status === 'completed' ? 1 : (item.progress || 0),
+                        timestamp: Date.now(),
+                      }}
+                      width={180}
+                      onPress={() => {
+                        if (item.status === 'completed' && item.localUri) {
+                          router.push({
+                            pathname: '/player',
+                            params: {
+                              id: item.id,
+                              streamUrl: item.localUri,
+                              title: item.title,
+                              isLive: 'false',
+                              quality: item.quality || 'HD',
+                              logo: item.poster || item.backdrop || '',
+                              poster: item.poster || item.backdrop || '',
+                              backdrop: item.backdrop || item.poster || '',
+                            }
+                          });
+                        } else {
+                          router.push('/downloads');
+                        }
+                      }}
+                    />
+                  )}
+                />
               </View>
             )}
             {contentRows.map((row, index) => (
@@ -512,7 +555,7 @@ export default function HomeScreen() {
                   row.type === 'live' ? (
                     <ChannelCard
                       channel={item}
-                      width={200}
+                      width={150}
                       onPress={() => {
                         setPlaybackQueue(row.items, itemIndex);
                         router.push({ pathname: '/player', params: { id: item.id, streamUrl: item.streamUrl, title: item.name, isLive: 'true', current: item.current, next: item.next, quality: item.quality, logo: item.logo || '', category: item.category || '' } });
@@ -521,7 +564,7 @@ export default function HomeScreen() {
                   ) : (
                     <MovieCard
                       movie={item}
-                      width={160}
+                      width={125}
                       onPress={() => {
                         if (row.type === 'series') {
                           router.push({
@@ -548,7 +591,7 @@ export default function HomeScreen() {
 
   // --- Mobile Layout ---
   return (
-    <View style={[styles.container, { backgroundColor: 'transparent' , display: Platform.OS === 'web' && !isFocused ? 'none' : 'flex' }]}>
+    <View style={[styles.container, { backgroundColor: '#05070a' , display: Platform.OS === 'web' && !isFocused ? 'none' : 'flex' }]}>
       <ScrollView
         contentContainerStyle={{ paddingBottom: insets.bottom + 80 }}
         showsVerticalScrollIndicator={false}
@@ -664,6 +707,47 @@ export default function HomeScreen() {
             </View>
           )}
 
+          {downloads.length > 0 && (
+            <View nativeID="tour-downloads" {...({ id: 'tour-downloads' } as any)}>
+              <ContentRow
+                title={t('my_downloads')}
+                data={downloads}
+                onSeeAll={() => router.push('/downloads')}
+                renderItem={({ item }) => (
+                  <ContinueWatchingCard
+                    item={{
+                      ...item,
+                      type: (item.type === 'series' ? 'series' : 'vod') as any,
+                      duration: 1,
+                      progress: item.status === 'completed' ? 1 : (item.progress || 0),
+                      timestamp: Date.now(),
+                    }}
+                    width={180}
+                    onPress={() => {
+                      if (item.status === 'completed' && item.localUri) {
+                        router.push({
+                          pathname: '/player',
+                          params: {
+                            id: item.id,
+                            streamUrl: item.localUri,
+                            title: item.title,
+                            isLive: 'false',
+                            quality: item.quality || 'HD',
+                            logo: item.poster || item.backdrop || '',
+                            poster: item.poster || item.backdrop || '',
+                            backdrop: item.backdrop || item.poster || '',
+                          }
+                        });
+                      } else {
+                        router.push('/downloads');
+                      }
+                    }}
+                  />
+                )}
+              />
+            </View>
+          )}
+
           {contentRows.map((row, index) => (
             <ContentRow
               key={`mobile-row-${index}`}
@@ -724,21 +808,21 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
+  container: { flex: 1, backgroundColor: '#05070a' },
   // TV Styles
-  tvHeroContent: { paddingLeft: 32, width: '60%', position: 'absolute', bottom: 80 },
-  tvHeroSubtitle: { fontSize: 16, fontWeight: 'bold', letterSpacing: 2, marginBottom: 12 },
-  tvHeroTitle: { fontSize: 36, fontWeight: '900', color: '#FFF', textShadowColor: 'rgba(0,0,0,0.5)', textShadowOffset: { width: 0, height: 4 }, textShadowRadius: 10, marginBottom: 12 },
-  tvHeroMeta: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 24 },
-  tvHeroMetaText: { color: 'rgba(255,255,255,0.8)', fontSize: 16, fontWeight: '600' },
+  tvHeroContent: { paddingLeft: 32, width: '60%', position: 'absolute', bottom: 28, alignItems: 'flex-start' },
+  tvHeroSubtitle: { fontSize: 13, fontWeight: 'bold', letterSpacing: 1.5, marginBottom: 6, textAlign: 'left', alignSelf: 'flex-start' },
+  tvHeroTitle: { fontSize: 26, fontWeight: '800', color: '#FFF', textShadowColor: 'rgba(0,0,0,0.5)', textShadowOffset: { width: 0, height: 2 }, textShadowRadius: 8, marginBottom: 10, textAlign: 'left', alignSelf: 'flex-start' },
+  tvHeroMeta: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 16 },
+  tvHeroMetaText: { color: 'rgba(255,255,255,0.8)', fontSize: 14, fontWeight: '600' },
   tvHeroDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.5)' },
-  tvHeroDesc: { fontSize: 16, color: 'rgba(255,255,255,0.7)', lineHeight: 24, marginBottom: 24, maxWidth: '90%' },
-  tvHeroActions: { flexDirection: 'row', gap: 16 },
-  tvHeroBtnPrimary: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 30 },
-  tvHeroBtnPrimaryText: { fontSize: 16, fontWeight: 'bold' },
-  tvHeroBtnSecondary: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 32, paddingVertical: 16, borderRadius: 30, borderWidth: 2, borderColor: 'transparent' },
-  tvHeroBtnSecondaryText: { color: '#FFF', fontSize: 18, fontWeight: 'bold' },
-  tvBottomContent: { paddingLeft: 24, marginTop: -32 },
+  tvHeroDesc: { fontSize: 14, color: 'rgba(255,255,255,0.7)', lineHeight: 20, marginBottom: 16, maxWidth: '90%' },
+  tvHeroActions: { flexDirection: 'row', gap: 12 },
+  tvHeroBtnPrimary: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20 },
+  tvHeroBtnPrimaryText: { fontSize: 14, fontWeight: 'bold' },
+  tvHeroBtnSecondary: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 20, borderWidth: 2, borderColor: 'transparent' },
+  tvHeroBtnSecondaryText: { color: '#FFF', fontSize: 15, fontWeight: 'bold' },
+  tvBottomContent: { paddingLeft: 24, marginTop: -30 },
 
   // Mobile Styles
   header: { position: 'absolute', zIndex: 10, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },

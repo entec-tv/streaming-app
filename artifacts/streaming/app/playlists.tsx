@@ -22,6 +22,7 @@ import { useAppStore } from '@/store/app-store';
 import { GoldButton } from '@/components/GoldButton';
 import { LinearGradient } from 'expo-linear-gradient';
 import { base64Encode } from '@/lib/base64';
+import { StartupPreloader } from '@/components/StartupPreloader';
 
 type AddTab = 'm3u' | 'xtream';
 
@@ -33,10 +34,16 @@ export default function PlaylistsScreen() {
     useAppStore();
 
   const [showAdd, setShowAdd] = useState(false);
+  const [playlistToDelete, setPlaylistToDelete] = useState<{ id: string; name: string } | null>(null);
   const [addTab, setAddTab] = useState<AddTab>('m3u');
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState('');
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
+
+  const [isPreloading, setIsPreloading] = useState(false);
+  const [preloadProgress, setPreloadProgress] = useState(0);
+  const [preloadStatus, setPreloadStatus] = useState('');
+  const [preloadPlaylistName, setPreloadPlaylistName] = useState('');
 
   const [m3uUrl, setM3uUrl] = useState('');
   const [m3uName, setM3uName] = useState('');
@@ -80,10 +87,17 @@ export default function PlaylistsScreen() {
       );
       setShowAdd(false);
       resetForm();
+      setIsPreloading(true);
+      setPreloadPlaylistName(name);
+      await useAppStore.getState().preloadFullPlaylistContent(id, (pct, msg) => {
+        setPreloadProgress(pct);
+        setPreloadStatus(msg);
+      });
       router.replace('/(tabs)');
     } catch (err: any) {
       Alert.alert('Failed to load playlist', err.message ?? 'Unknown error');
     } finally {
+      setIsPreloading(false);
       setLoading(false);
     }
   };
@@ -118,10 +132,17 @@ export default function PlaylistsScreen() {
       });
       setShowAdd(false);
       resetForm();
+      setIsPreloading(true);
+      setPreloadPlaylistName(name);
+      await useAppStore.getState().preloadFullPlaylistContent(id, (pct, msg) => {
+        setPreloadProgress(pct);
+        setPreloadStatus(msg);
+      });
       router.replace('/(tabs)');
     } catch (err: any) {
       Alert.alert('Failed to connect', err.message ?? 'Check your Xtream credentials');
     } finally {
+      setIsPreloading(false);
       setLoading(false);
     }
   };
@@ -138,25 +159,18 @@ export default function PlaylistsScreen() {
   };
 
   const handleDelete = (id: string, name: string) => {
-    if (id.startsWith('admin_sub_')) {
-      Alert.alert(t('not_allowed'), t('cannot_delete_admin_subscription'));
-      return;
-    }
-    if (Platform.OS === 'web') {
-      if (window.confirm(`Remove "${name}"?`)) {
-        deletePlaylist(id);
-      }
-    } else {
-      Alert.alert('Delete Playlist', `Remove "${name}"?`, [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: () => deletePlaylist(id),
-        },
-      ]);
-    }
+    setPlaylistToDelete({ id, name });
   };
+
+  if (isPreloading) {
+    return (
+      <StartupPreloader
+        progress={preloadProgress}
+        statusMessage={preloadStatus}
+        playlistName={preloadPlaylistName}
+      />
+    );
+  }
 
   return (
     <View style={[styles.container, { backgroundColor: 'transparent', paddingTop: insets.top }]}>
@@ -227,7 +241,7 @@ export default function PlaylistsScreen() {
                       <View style={[styles.activeDot, { backgroundColor: colors.gold }]} />
                     )}
                     <Text style={[styles.cardTitle, { color: colors.text }]} numberOfLines={1}>
-                      {item.name === 'admin_subscription' ? t('admin_subscription') : item.name}
+                      {item.id.startsWith('admin_sub_') || item.name === 'admin_subscription' ? (t('admin_subscription') || 'الاشتراك الرئيسي') : item.name}
                     </Text>
                   </View>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
@@ -241,8 +255,10 @@ export default function PlaylistsScreen() {
                   style={[styles.url, { color: colors.mutedForeground, marginTop: 12 }]}
                   numberOfLines={1}
                 >
-                  {item.url.startsWith('xtream://')
-                    ? `Xtream Codes · ${item.name}`
+                  {item.id.startsWith('admin_sub_') || item.name === 'admin_subscription'
+                    ? (t('admin_subscription') || 'الاشتراك الرئيسي')
+                    : item.url.startsWith('xtream://')
+                    ? 'Xtream Codes'
                     : item.url.startsWith('demo://')
                     ? 'Demo playlist'
                     : item.url}
@@ -414,6 +430,80 @@ export default function PlaylistsScreen() {
             </View>
           </View>
         </KeyboardAvoidingView>
+      )}
+      {playlistToDelete && (
+        <View style={[StyleSheet.absoluteFill, styles.modalOverlay, { justifyContent: 'center', alignItems: 'center', zIndex: 9999 }]}>
+          <TVFocusable focusable={false} disableBorder style={StyleSheet.absoluteFill} onPress={() => setPlaylistToDelete(null)} />
+          <View
+            style={{
+              backgroundColor: colors.surface,
+              borderRadius: 16,
+              padding: 24,
+              width: '90%',
+              maxWidth: 420,
+              borderWidth: 1,
+              borderColor: colors.border,
+              zIndex: 10000,
+            }}
+          >
+            <View style={{ alignItems: 'center', marginBottom: 16 }}>
+              <View style={{ width: 56, height: 56, borderRadius: 28, backgroundColor: 'rgba(239,68,68,0.15)', justifyContent: 'center', alignItems: 'center', marginBottom: 12 }}>
+                <Lineicons icon={Trash3Bulk} size={28} color="#EF4444" />
+              </View>
+              <Text style={{ fontSize: 18, fontWeight: 'bold', color: colors.text, textAlign: 'center' }}>
+                {t('delete_playlist') || 'حذف قائمة التشغيل'}
+              </Text>
+              <Text style={{ fontSize: 14, color: colors.mutedForeground, textAlign: 'center', marginTop: 8, lineHeight: 20 }}>
+                {`هل أنت متأكد من حذف قائمة "${playlistToDelete.name}"؟`}
+              </Text>
+            </View>
+
+            <View style={{ flexDirection: 'row', gap: 12, marginTop: 8 }}>
+              <TVFocusable
+                style={({ focused }: any) => [
+                  {
+                    flex: 1,
+                    height: 44,
+                    borderRadius: 10,
+                    backgroundColor: colors.surface2,
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                  },
+                  focused && { borderColor: colors.gold, borderWidth: 1 }
+                ]}
+                onPress={() => setPlaylistToDelete(null)}
+              >
+                <Text style={{ color: colors.text, fontWeight: '600', fontSize: 14 }}>
+                  {t('cancel') || 'إلغاء'}
+                </Text>
+              </TVFocusable>
+
+              <TVFocusable
+                hasTVPreferredFocus={true}
+                style={({ focused }: any) => [
+                  {
+                    flex: 1,
+                    height: 44,
+                    borderRadius: 10,
+                    backgroundColor: '#EF4444',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                  },
+                  focused && { transform: [{ scale: 1.05 }], backgroundColor: '#DC2626' }
+                ]}
+                onPress={async () => {
+                  const targetId = playlistToDelete.id;
+                  setPlaylistToDelete(null);
+                  await deletePlaylist(targetId);
+                }}
+              >
+                <Text style={{ color: '#FFF', fontWeight: 'bold', fontSize: 14 }}>
+                  {t('delete') || 'حذف'}
+                </Text>
+              </TVFocusable>
+            </View>
+          </View>
+        </View>
       )}
     </View>
   );

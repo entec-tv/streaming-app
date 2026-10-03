@@ -37,6 +37,13 @@ app.on('certificate-error', (event, webContents, url, error, certificate, callba
   callback(true);
 });
 
+process.on('uncaughtException', (err) => {
+  console.error('[MAIN PROCESS UNCAUGHT EXCEPTION]:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[MAIN PROCESS UNHANDLED REJECTION]:', reason);
+});
+
 let mainWindow;
 let server;
 let serverPort = 1337;
@@ -250,6 +257,14 @@ function startServer() {
       const targetUrl = req.query.url;
       if (!targetUrl) return res.status(400).send('Missing url');
 
+      const lowerTarget = (targetUrl || '').toLowerCase();
+      const isLiveStream = lowerTarget.includes('/live/') || 
+        lowerTarget.endsWith('.ts') || 
+        lowerTarget.includes('.ts?');
+      if (isLiveStream) {
+        return res.json({ duration: 0, codec: 'h264', isLive: true });
+      }
+
       if (codecCache.has(targetUrl)) {
          const cached = codecCache.get(targetUrl);
          return res.json({ duration: cached.duration || 0, codec: cached.codec || 'h264', cached: true });
@@ -443,7 +458,9 @@ function startServer() {
       const ffmpegArgs = [
         '-reconnect', '1',
         '-reconnect_streamed', '1',
-        '-reconnect_delay_max', '5'
+        '-reconnect_delay_max', '5',
+        '-fflags', '+genpts+discardcorrupt',
+        '-avoid_negative_ts', 'make_zero'
       ];
 
       if (startTime) {
@@ -706,30 +723,68 @@ function startServer() {
 
       const destPath = path.join(downloadsDir, `${id}.mp4`);
 
-      activeDownloadsApp.set(id, {
+      // Clean up previous instance for this ID if any
+      if (activeDownloadsApp.has(id)) {
+        const old = activeDownloadsApp.get(id);
+        old.status = 'canceled';
+        if (old.watchdogTimer) clearInterval(old.watchdogTimer);
+        if (old.response) {
+          try { old.response.destroy(); } catch (e) {}
+          old.response = null;
+        }
+        if (old.request) {
+          try { old.request.destroy(); } catch (e) {}
+          old.request = null;
+        }
+        if (old.fileStream) {
+          try { old.fileStream.destroy(); } catch (e) {}
+          old.fileStream = null;
+        }
+        activeDownloadsApp.delete(id);
+      }
+
+      // Check if file partially exists on disk to support auto-resume
+      let initialDownloaded = 0;
+      if (fs.existsSync(destPath)) {
+        try {
+          initialDownloaded = fs.statSync(destPath).size;
+        } catch (e) {}
+      }
+
+      const item = {
+        id,
         progress: 0,
         status: 'downloading',
         localUri: destPath,
         request: null,
+        response: null,
+        fileStream: null,
         url: urlStr,
-        downloadedBytes: 0,
-        totalBytes: 0
-      });
+        downloadedBytes: initialDownloaded,
+        totalBytes: 0,
+        retryCount: 0,
+        lastDataTime: Date.now(),
+        watchdogTimer: null,
+        resumeFunction: null
+      };
+      activeDownloadsApp.set(id, item);
       res.json({ localUri: destPath });
 
-      let fileStream = fs.createWriteStream(destPath);
-
-      const downloadFile = (targetUrl, redirectsLeft, isResume = false) => {
+      const downloadFile = (targetUrl, redirectsLeft = 5, isResume = false) => {
         let parsedUrl;
         try { parsedUrl = new URL(targetUrl); } catch (e) {
-          const errItem = activeDownloadsApp.get(id);
-          if (errItem) errItem.status = 'error';
+          console.error(`[DOWNLOAD] Invalid URL: ${targetUrl}`);
+          item.status = 'error';
           return;
         }
 
-        const item = activeDownloadsApp.get(id);
-        const headers = { 'User-Agent': 'VLC/3.0.16 LibVLC/3.0.16', 'Accept': '*/*' };
-        if (isResume && item && item.downloadedBytes > 0) {
+        const headers = { 
+          'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18', 
+          'Accept': '*/*',
+          'Accept-Encoding': 'identity',
+          'Connection': 'keep-alive'
+        };
+        if (item.downloadedBytes > 0) {
           headers['Range'] = `bytes=${item.downloadedBytes}-`;
         }
 
@@ -738,6 +793,11 @@ function startServer() {
           headers: headers,
           agent: parsedUrl.protocol === 'https:' ? httpsAgent : httpAgent,
         }, (response) => {
+          item.response = response;
+          if (item.status === 'canceled' || item.status === 'paused') {
+            response.destroy();
+            return;
+          }
 
           if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
             let redirectUrl = response.headers.location;
@@ -745,65 +805,226 @@ function startServer() {
               redirectUrl = new URL(redirectUrl, targetUrl).href;
             }
             if (redirectsLeft > 0) {
-              response.on('data', () => { }); // drain
-              return downloadFile(redirectUrl, redirectsLeft - 1);
+              response.resume(); // drain
+              return downloadFile(redirectUrl, redirectsLeft - 1, isResume);
             }
           }
 
-          if (!isResume) {
-            const contentLength = parseInt(response.headers['content-length'] || '0', 10);
-            if (item && !item.totalBytes && contentLength > 0) {
-              item.totalBytes = contentLength;
+          // Handle 416 Range Not Satisfiable (file already fully downloaded)
+          if (response.statusCode === 416) {
+            response.resume();
+            if (item.downloadedBytes > 0) {
+              item.status = 'completed';
+              item.progress = 1;
+              console.log(`[DOWNLOAD COMPLETED] (${id}): 416 Range fully satisfied.`);
+            } else {
+              item.status = 'error';
             }
-          }
-
-          response.on('data', (chunk) => {
-            if (item) {
-              item.downloadedBytes += chunk.length;
-              if (item.totalBytes > 0) {
-                item.progress = item.downloadedBytes / item.totalBytes;
-              }
-            }
-          });
-
-          response.pipe(fileStream);
-
-          response.on('end', () => {
-            fileStream.close();
-            const endItem = activeDownloadsApp.get(id);
-            if (endItem) {
-              endItem.status = 'completed';
-              endItem.progress = 1;
-            }
-          });
-        }).on('error', (err) => {
-          const errItem = activeDownloadsApp.get(id);
-          if (errItem && errItem.status === 'paused') {
             return;
           }
-          fs.unlink(destPath, () => { });
-          if (errItem) errItem.status = 'error';
+
+          // Handle HTTP server errors (e.g. 502 Bad Gateway from IPTV CDN, 503, 429)
+          if (response.statusCode >= 400) {
+            console.warn(`[DOWNLOAD HTTP ${response.statusCode}] (${id}) from ${targetUrl}`);
+            response.resume();
+            if (item.retryCount < 10 && item.status === 'downloading') {
+              item.retryCount++;
+              const backoff = Math.min(10000, 1500 * item.retryCount);
+              console.log(`[DOWNLOAD RETRY] (${id}): Server returned ${response.statusCode}. Retrying in ${backoff}ms (attempt ${item.retryCount}/10)...`);
+              setTimeout(() => {
+                if (item.status === 'downloading') {
+                  downloadFile(item.url, 5, true);
+                }
+              }, backoff);
+            } else {
+              item.status = 'error';
+            }
+            return;
+          }
+
+          // Reset retry count on successful response
+          item.retryCount = 0;
+
+          // Extract totalBytes from Content-Range or Content-Length
+          const contentRange = response.headers['content-range'];
+          if (contentRange) {
+            const match = contentRange.match(/\/(\d+)/);
+            if (match) item.totalBytes = parseInt(match[1], 10);
+          }
+          if (!item.totalBytes) {
+            const contentLength = parseInt(response.headers['content-length'] || '0', 10);
+            if (contentLength > 0) {
+              item.totalBytes = contentLength + (response.statusCode === 206 ? item.downloadedBytes : 0);
+            }
+          }
+
+          if (item.totalBytes > 0 && item.downloadedBytes > 0) {
+            item.progress = Math.min(1, item.downloadedBytes / item.totalBytes);
+          }
+
+          try {
+            if (item.fileStream) {
+              try { item.fileStream.destroy(); } catch (e) {}
+              item.fileStream = null;
+            }
+
+            const useAppend = (item.downloadedBytes > 0 && response.statusCode === 206);
+            if (!useAppend && !isResume) {
+              item.downloadedBytes = 0;
+            }
+
+            const fileStream = fs.createWriteStream(item.localUri, { flags: useAppend ? 'a' : 'w' });
+            fileStream.on('error', (fsErr) => {
+              console.error(`[DOWNLOAD FILESTREAM ERROR] (${id}):`, fsErr.message);
+              item.status = 'error';
+              if (item.watchdogTimer) clearInterval(item.watchdogTimer);
+              if (item.request) {
+                try { item.request.destroy(); } catch (e) {}
+                item.request = null;
+              }
+            });
+            item.fileStream = fileStream;
+
+            item.lastDataTime = Date.now();
+            if (item.watchdogTimer) clearInterval(item.watchdogTimer);
+            item.watchdogTimer = setInterval(() => {
+              if (item.status !== 'downloading') {
+                clearInterval(item.watchdogTimer);
+                return;
+              }
+              // If no data chunks arrived for 20 seconds, connection has stalled
+              if (Date.now() - item.lastDataTime > 20000) {
+                console.warn(`[DOWNLOAD STALL DETECTED] (${id}): No data for 20s. Auto-reconnecting...`);
+                clearInterval(item.watchdogTimer);
+                if (item.request) {
+                  try { item.request.destroy(); } catch (e) {}
+                  item.request = null;
+                }
+                if (item.fileStream) {
+                  try { item.fileStream.destroy(); } catch (e) {}
+                  item.fileStream = null;
+                }
+                if (item.retryCount < 10) {
+                  item.retryCount++;
+                  setTimeout(() => {
+                    if (item.status === 'downloading') {
+                      downloadFile(item.url, 5, true);
+                    }
+                  }, 2000);
+                } else {
+                  item.status = 'error';
+                }
+              }
+            }, 5000);
+
+            response.on('data', (chunk) => {
+              if (item.status === 'canceled' || item.status === 'paused') {
+                response.destroy();
+                return;
+              }
+              item.lastDataTime = Date.now();
+              item.downloadedBytes += chunk.length;
+              if (item.totalBytes > 0) {
+                item.progress = Math.min(1, item.downloadedBytes / item.totalBytes);
+              }
+            });
+
+            response.pipe(fileStream);
+
+            const handleStreamFinished = () => {
+              if (item.watchdogTimer) clearInterval(item.watchdogTimer);
+              if (item.status === 'canceled' || item.status === 'paused') return;
+
+              // Check if completed or closed prematurely by server/CDN
+              if (item.totalBytes > 0 && item.downloadedBytes < item.totalBytes) {
+                console.warn(`[DOWNLOAD PREMATURE CLOSE] (${id}): Received ${item.downloadedBytes} of ${item.totalBytes} bytes. Auto-resuming in 2s...`);
+                if (item.fileStream) {
+                  try { item.fileStream.destroy(); } catch (e) {}
+                  item.fileStream = null;
+                }
+                if (item.retryCount < 15) {
+                  item.retryCount++;
+                  setTimeout(() => {
+                    if (item.status === 'downloading') {
+                      downloadFile(item.url, 5, true);
+                    }
+                  }, 2000);
+                } else {
+                  item.status = 'error';
+                }
+              } else {
+                item.status = 'completed';
+                item.progress = 1;
+                console.log(`[DOWNLOAD COMPLETED] (${id}): Successfully finished downloading ${item.downloadedBytes} bytes.`);
+              }
+            };
+
+            response.on('end', handleStreamFinished);
+            response.on('close', () => {
+              if (!response.complete && item.status === 'downloading') {
+                handleStreamFinished();
+              }
+            });
+          } catch (streamErr) {
+            console.error(`[DOWNLOAD STREAM INIT ERROR] (${id}):`, streamErr);
+            item.status = 'error';
+          }
         });
 
-        if (item) item.request = request;
+        request.setTimeout(25000, () => {
+          console.warn(`[DOWNLOAD SOCKET TIMEOUT] (${id}): Socket timed out after 25s`);
+          request.destroy(new Error('Socket timeout'));
+        });
+
+        request.on('error', (err) => {
+          if (item.watchdogTimer) clearInterval(item.watchdogTimer);
+          if (item.status === 'paused' || item.status === 'canceled') {
+            return;
+          }
+          console.warn(`[DOWNLOAD HTTP ERROR] (${id}): ${err.message}. Retrying...`);
+          if (item.fileStream) {
+            try { item.fileStream.destroy(); } catch (e) {}
+            item.fileStream = null;
+          }
+          if (item.retryCount < 10) {
+            item.retryCount++;
+            const delay = Math.min(10000, 2000 * item.retryCount);
+            setTimeout(() => {
+              if (item.status === 'downloading') {
+                downloadFile(item.url, 5, true);
+              }
+            }, delay);
+          } else {
+            item.status = 'error';
+          }
+        });
+
+        item.request = request;
       };
 
-      downloadFile(urlStr, 5, false);
+      item.resumeFunction = () => {
+        if (fs.existsSync(destPath)) {
+          try {
+            item.downloadedBytes = fs.statSync(destPath).size;
+          } catch (e) {}
+        }
+        item.retryCount = 0;
+        downloadFile(item.url, 5, true);
+      };
 
-      // Store the resume function so we can call it later
-      const item = activeDownloadsApp.get(id);
-      if (item) {
-        item.resumeFunction = () => {
-          fileStream = fs.createWriteStream(item.localUri, { flags: 'a' });
-          downloadFile(item.url, 5, true);
-        };
-      }
+      downloadFile(urlStr, 5, initialDownloaded > 0);
     });
 
     expressApp.get('/api/download/status', (req, res) => {
       const result = {};
       for (const [id, data] of activeDownloadsApp.entries()) {
-        result[id] = { progress: data.progress, status: data.status, localUri: data.localUri };
+        result[id] = { 
+          progress: data.progress, 
+          status: data.status, 
+          localUri: data.localUri,
+          downloadedBytes: data.downloadedBytes,
+          totalBytes: data.totalBytes
+        };
       }
       res.json(result);
     });
@@ -813,9 +1034,18 @@ function startServer() {
       if (activeDownloadsApp.has(id)) {
         const item = activeDownloadsApp.get(id);
         item.status = 'paused';
+        if (item.watchdogTimer) clearInterval(item.watchdogTimer);
+        if (item.response) {
+          try { item.response.destroy(); } catch (e) {}
+          item.response = null;
+        }
         if (item.request) {
-          item.request.abort();
+          try { item.request.destroy(); } catch (e) {}
           item.request = null;
+        }
+        if (item.fileStream) {
+          try { item.fileStream.end(); } catch (e) {}
+          item.fileStream = null;
         }
       }
       res.send('ok');
@@ -823,11 +1053,22 @@ function startServer() {
 
     expressApp.get('/api/download/resume', (req, res) => {
       const id = req.query.id;
+      const urlStr = req.query.url;
       if (activeDownloadsApp.has(id)) {
         const item = activeDownloadsApp.get(id);
-        if (item.status === 'paused' && item.resumeFunction) {
+        if (item.status === 'paused' || item.status === 'error') {
           item.status = 'downloading';
-          item.resumeFunction();
+          if (item.resumeFunction) {
+            item.resumeFunction();
+          }
+        }
+      } else if (id && urlStr) {
+        // Re-initiate if activeDownloadsApp lost it (e.g. app restart)
+        const downloadsDir = path.join(os.homedir(), 'Downloads', 'ENTEC');
+        const destPath = path.join(downloadsDir, `${id}.mp4`);
+        if (fs.existsSync(destPath)) {
+          // Trigger start which will auto-resume from existing size
+          req.url = `/api/download/start?id=${encodeURIComponent(id)}&url=${encodeURIComponent(urlStr)}`;
         }
       }
       res.send('ok');
@@ -835,13 +1076,42 @@ function startServer() {
 
     expressApp.get('/api/download/cancel', (req, res) => {
       const id = req.query.id;
+      if (!id) return res.send('ok');
+
+      let targetPath = null;
       if (activeDownloadsApp.has(id)) {
         const data = activeDownloadsApp.get(id);
         data.status = 'canceled';
-        if (data.request) data.request.abort();
-        fs.unlink(data.localUri, () => { });
+        if (data.watchdogTimer) clearInterval(data.watchdogTimer);
+        if (data.response) {
+          try { data.response.destroy(); } catch (e) {}
+          data.response = null;
+        }
+        if (data.request) {
+          try { data.request.destroy(); } catch (e) {}
+          data.request = null;
+        }
+        if (data.fileStream) {
+          try { data.fileStream.destroy(); } catch (e) {}
+          data.fileStream = null;
+        }
+        targetPath = data.localUri;
         activeDownloadsApp.delete(id);
       }
+
+      if (!targetPath) {
+        const downloadsDir = path.join(os.homedir(), 'Downloads', 'ENTEC');
+        targetPath = path.join(downloadsDir, `${id}.mp4`);
+      }
+
+      const attemptUnlink = (retries = 5) => {
+        fs.unlink(targetPath, (err) => {
+          if (err && retries > 0 && (err.code === 'EPERM' || err.code === 'EBUSY')) {
+            setTimeout(() => attemptUnlink(retries - 1), 250);
+          }
+        });
+      };
+      setTimeout(attemptUnlink, 100);
       res.send('ok');
     });
 

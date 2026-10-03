@@ -376,33 +376,12 @@ export default function CatchUpScreen() {
   // --- TV Layout ---
   if (isLargeScreen) {
     const isWeb = Platform.OS === 'web';
-    const glassPaneStyle: any = isWeb ? {
-      backgroundColor: colors.glass || (colors.card + 'E6'),
-      backdropFilter: 'blur(30px)',
-      WebkitBackdropFilter: 'blur(30px)',
-      borderRadius: 16,
-      borderWidth: 1,
-      borderColor: colors.border,
-      marginTop: 12,
-      marginBottom: 32,
-      marginRight: 16,
-      overflow: 'hidden',
-    } : {
-      backgroundColor: colors.glass || (colors.card + 'E6'),
-      borderRadius: 16,
-      borderWidth: 1,
-      borderColor: colors.border,
-      marginTop: 12,
-      marginBottom: 32,
-      marginRight: 16,
-      overflow: 'hidden',
-    };
 
     return (
-      <View style={[styles.tvContainer, { backgroundColor: 'transparent', paddingLeft: isLargeScreen ? 104 : 24 , display: Platform.OS === 'web' && !isFocused ? 'none' : 'flex' }]}>
-        <View style={[{ flexDirection: 'row', flex: 1 }, glassPaneStyle]}>
+      <View style={[styles.tvContainer, { backgroundColor: '#05070a', paddingLeft: 0, display: Platform.OS === 'web' && !isFocused ? 'none' : 'flex' }]}>
+        <View style={{ flexDirection: 'row', flex: 1, backgroundColor: '#0A0C10', height: '100%' }}>
           {/* Pane 1: Channels */}
-          <View nativeID="tour-catchup-list" {...({ id: 'tour-catchup-list' } as any)} style={[styles.tvPaneChannels, { borderRightWidth: 1, borderRightColor: colors.border }]}>
+          <View nativeID="tour-catchup-list" {...({ id: 'tour-catchup-list' } as any)} style={[styles.tvPaneChannels, { borderRightWidth: 1, borderRightColor: colors.border }]} data-focus-zone="catchup-channels">
             <View style={styles.tvHeader}>
               <Text style={[styles.tvTitle, { color: colors.text }]}>{t('catch_up')}</Text>
             </View>
@@ -444,7 +423,7 @@ export default function CatchUpScreen() {
           </View>
 
           {/* Pane 2: Days */}
-          <View style={[styles.tvPaneDays, { borderRightWidth: 1, borderRightColor: colors.border }]}>
+          <View style={[styles.tvPaneDays, { borderRightWidth: 1, borderRightColor: colors.border }]} data-focus-zone="catchup-days">
             <View style={styles.tvHeader}>
               <Text style={[styles.tvTitle, { color: colors.text }]}>{t('days')}</Text>
             </View>
@@ -471,7 +450,7 @@ export default function CatchUpScreen() {
           </View>
 
           {/* Pane 3: EPG Schedule */}
-          <View style={[styles.tvPaneEpg, { flex: 1 }]}>
+          <View style={[styles.tvPaneEpg, { flex: 1 }]} data-focus-zone="catchup-programs">
             <View style={styles.tvHeader}>
               <Text style={[styles.tvTitle, { color: colors.text }]}>{t('schedule')}</Text>
             </View>

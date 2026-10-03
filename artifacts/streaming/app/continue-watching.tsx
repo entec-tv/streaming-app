@@ -76,19 +76,25 @@ export default function ContinueWatchingScreen() {
               item={item}
               width={cardWidth}
               onPress={() => {
+                const lowerStream = (item.streamUrl || '').toLowerCase();
+                const isLiveStream = item.type === 'live' || Boolean(lowerStream && (
+                  lowerStream.includes('/live/') || 
+                  lowerStream.endsWith('.ts') || 
+                  lowerStream.includes('.ts?')
+                ));
                 router.push({
                   pathname: '/player',
                   params: {
                     id: item.id,
                     streamUrl: item.streamUrl,
                     title: item.title,
-                    isLive: item.type === 'live' ? 'true' : 'false',
+                    isLive: isLiveStream ? 'true' : 'false',
                     current: '',
                     next: '',
                     quality: item.quality,
                     logo: item.poster || item.backdrop || '',
                     category: item.category || '',
-                    autoResume: 'true'
+                    autoResume: isLiveStream ? 'false' : 'true'
                   }
                 });
               }}

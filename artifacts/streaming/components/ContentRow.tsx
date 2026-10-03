@@ -11,7 +11,7 @@ interface ContentRowProps {
   onSeeAll?: () => void;
 }
 
-const Separator = () => <View style={{ width: 12 }} />;
+const Separator = () => <View style={{ width: 10 }} />;
 
 export const ContentRow = React.memo(function ContentRow({ title, data, renderItem, onSeeAll }: ContentRowProps) {
   const colors = useColors();
@@ -27,7 +27,7 @@ export const ContentRow = React.memo(function ContentRow({ title, data, renderIt
           <TVFocusable 
             onPress={onSeeAll}
             style={({ focused }: any) => [
-              { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16 },
+              { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 14 },
               focused && { backgroundColor: 'rgba(212,168,67,0.2)' }
             ]}
             disableBorder
@@ -57,21 +57,21 @@ export const ContentRow = React.memo(function ContentRow({ title, data, renderIt
 
 const styles = StyleSheet.create({
   container: {
-    marginBottom: 40,
+    marginBottom: 24,
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 20,
-    marginBottom: 16,
+    marginBottom: 10,
   },
   title: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: 'bold',
   },
   seeAll: {
-    fontSize: 14,
+    fontSize: 13,
   },
   listContent: {
     paddingHorizontal: 20,

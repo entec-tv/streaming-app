@@ -8,7 +8,7 @@ import React from "react";
 import { Lineicons } from '@lineiconshq/react-native-lineicons';
 import { Search1Bulk, User4Bulk } from '@lineiconshq/free-icons';
 import { TVFocusable } from '@/components/TVFocusable';
-import { Platform, StyleSheet, View, Text, useWindowDimensions } from "react-native";
+import { Platform, StyleSheet, View, Text, useWindowDimensions, ActivityIndicator } from "react-native";
 import { LinearGradient } from 'expo-linear-gradient';
 import { useColors } from "@/hooks/useColors";
 import { useTranslation } from "@/hooks/useTranslation";
@@ -28,25 +28,63 @@ function ClassicTabLayout() {
   const isLandscape = width > height;
   const subscriptionExpired = useAppStore((s) => s.subscriptionExpired);
   const isFullscreen = useAppStore((s) => s.isFullscreen);
-  const { isRTL } = useTranslation();
+  const { isRTL, t, language } = useTranslation();
   const pathname = usePathname();
 
+  const [isMobileRefreshing, setIsMobileRefreshing] = React.useState(false);
+  const checkAuthStatus = useAppStore((s) => s.checkAuthStatus);
+  const refreshPlaylist = useAppStore((s) => s.refreshPlaylist);
+  const showGlobalAlert = useAppStore((s) => s.showGlobalAlert);
+  const hideGlobalAlert = useAppStore((s) => s.hideGlobalAlert);
+
+  const handleMobileRefresh = async () => {
+    if (isMobileRefreshing) return;
+    setIsMobileRefreshing(true);
+    try {
+      await checkAuthStatus();
+      if (activePlaylistId) {
+        await refreshPlaylist(activePlaylistId);
+      }
+      showGlobalAlert(
+        t('success') || 'Success',
+        t('refresh_success') || 'Data refreshed successfully',
+        t('ok') || 'OK',
+        () => hideGlobalAlert()
+      );
+    } catch (error) {
+      console.error('Failed to refresh data from mobile header:', error);
+    } finally {
+      setIsMobileRefreshing(false);
+    }
+  };
+
+  // Background search index preloading
+  const activePlaylistId = useAppStore((s) => s.activePlaylistId);
+  const searchIndexReady = useAppStore((s) => s.searchIndexReady);
+  const loadingSearchIndex = useAppStore((s) => s.loadingSearchIndex);
+  const loadSearchIndex = useAppStore((s) => s.loadSearchIndex);
+
+  React.useEffect(() => {
+    if (activePlaylistId && !searchIndexReady && !loadingSearchIndex) {
+      loadSearchIndex(activePlaylistId).catch(() => {});
+    }
+  }, [activePlaylistId, searchIndexReady, loadingSearchIndex]);
+
   return (
-    <View style={styles.layoutContainer}>
-      {(isLargeScreen && pathname !== '/') && (
-        <LinearGradient
-          colors={['rgba(5,7,10,1)', 'rgba(5,7,10,1)', 'rgba(5,7,10,1)', 'rgba(28,49,89,0.35)']}
-          locations={[0, 0.45, 0.55, 1]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={[StyleSheet.absoluteFillObject, { backgroundColor: '#05070a' }]}
-        />
-      )}
+    <View key={`tab-layout-${language}`} style={[styles.layoutContainer, { backgroundColor: '#05070a' }]}>
+      <LinearGradient
+        colors={['rgba(5,7,10,1)', 'rgba(5,7,10,1)', 'rgba(5,7,10,1)', 'rgba(28,49,89,0.35)']}
+        locations={[0, 0.45, 0.55, 1]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={[StyleSheet.absoluteFillObject, { backgroundColor: '#05070a' }]}
+      />
       {(!subscriptionExpired && !isFullscreen) && <TVSidebar />}
-      <View style={[styles.contentContainer, (isLargeScreen && !subscriptionExpired && !isFullscreen) && (isRTL ? { paddingRight: 80 } : { paddingLeft: 80 })]}>
+      <View style={[styles.contentContainer, { backgroundColor: '#05070a' }, (isLargeScreen && !subscriptionExpired && !isFullscreen) && (isRTL ? { paddingRight: 76 } : { paddingLeft: 76 })]}>
         <Tabs
+          key={`tabs-${language}`}
           screenOptions={{
-            sceneStyle: { backgroundColor: 'transparent' },
+            sceneStyle: { backgroundColor: '#05070a' },
             lazy: true,
             headerShown: !isLargeScreen,
             headerTransparent: isLandscape,
@@ -60,6 +98,31 @@ function ClassicTabLayout() {
             ) : null,
             headerRight: () => (
               <View style={{ flexDirection: 'row', gap: 12, paddingRight: 20, paddingTop: isLandscape ? Math.max(Platform.OS === 'ios' ? 10 : 0, 10) : 0 }}>
+                <TVFocusable 
+                  onPress={handleMobileRefresh}
+                  disabled={isMobileRefreshing}
+                  style={({ focused }: any) => [
+                    { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.3)' },
+                    focused && { backgroundColor: colors.gold, transform: [{ scale: 1.1 }] }
+                  ]}
+                >
+                  {({ focused }: any) => (
+                    isMobileRefreshing ? (
+                      <ActivityIndicator size="small" color={colors.gold} />
+                    ) : (
+                      <Ionicons name="refresh" size={20} color={focused ? "#000" : colors.text} />
+                    )
+                  )}
+                </TVFocusable>
+                <TVFocusable 
+                  onPress={() => router.push('/downloads')}
+                  style={({ focused }: any) => [
+                    { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.3)' },
+                    focused && { backgroundColor: colors.gold, transform: [{ scale: 1.1 }] }
+                  ]}
+                >
+                  {({ focused }: any) => <Ionicons name="download-outline" size={22} color={focused ? "#000" : colors.text} />}
+                </TVFocusable>
                 <TVFocusable 
                   onPress={() => router.push('/search')}
                   style={({ focused }: any) => [
@@ -122,7 +185,7 @@ function ClassicTabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: "Home",
+          title: t('home') || "Home",
           tabBarIcon: ({ color, focused }) => (
             <View style={{ paddingTop: 4 }}>
               <Ionicons name={focused ? "home" : "home-outline"} size={24} color={color} />
@@ -133,7 +196,7 @@ function ClassicTabLayout() {
       <Tabs.Screen
         name="live"
         options={{
-          title: "Live TV",
+          title: t('live_tv') || "Live TV",
           tabBarIcon: ({ color, focused }) => (
             <View style={{ paddingTop: 4 }}>
               <Ionicons name={focused ? "tv" : "tv-outline"} size={24} color={color} />
@@ -144,7 +207,7 @@ function ClassicTabLayout() {
       <Tabs.Screen
         name="movies"
         options={{
-          title: "Movies",
+          title: t('movies') || "Movies",
           tabBarIcon: ({ color, focused }) => (
             <View style={{ paddingTop: 4 }}>
               <Ionicons name={focused ? "film" : "film-outline"} size={24} color={color} />
@@ -155,7 +218,7 @@ function ClassicTabLayout() {
       <Tabs.Screen
         name="series"
         options={{
-          title: "Series",
+          title: t('series') || "Series",
           tabBarIcon: ({ color, focused }) => (
             <View style={{ paddingTop: 4 }}>
               <Ionicons name={focused ? "albums" : "albums-outline"} size={24} color={color} />
@@ -166,7 +229,7 @@ function ClassicTabLayout() {
       <Tabs.Screen
         name="catchup"
         options={{
-          title: "Catch Up",
+          title: t('catchup') || "Catch Up",
           tabBarIcon: ({ color, focused }) => (
             <View style={{ paddingTop: 4 }}>
               <Ionicons name={focused ? "time" : "time-outline"} size={24} color={color} />
@@ -178,21 +241,21 @@ function ClassicTabLayout() {
         name="favorites"
         options={{
           href: null,
-          title: "Favorites",
+          title: t('favorites') || "Favorites",
         }}
       />
       <Tabs.Screen
         name="profile"
         options={{
           href: null,
-          title: "Profile",
+          title: t('profile') || "Profile",
         }}
       />
       <Tabs.Screen
         name="settings"
         options={{
           href: null,
-          title: "Settings",
+          title: t('settings') || "Settings",
         }}
       />
       
@@ -211,8 +274,10 @@ export default function TabLayout() {
 const styles = StyleSheet.create({
   layoutContainer: {
     flex: 1,
+    backgroundColor: '#05070a',
   },
   contentContainer: {
     flex: 1,
+    backgroundColor: '#05070a',
   }
 });

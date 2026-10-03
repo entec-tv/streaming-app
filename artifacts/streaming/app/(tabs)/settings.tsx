@@ -25,13 +25,14 @@ export default function SettingsScreen() {
   const playlists = useAppStore(s => s.playlists);
 
   const SETTINGS_CATEGORIES = [
-    // Row 1
+    // Row 1 - Primary Actions
+    { id: 'downloads', title: t('my_downloads'), icon: 'download-outline', color: '#80CBC4' },
     { id: 'network', title: t('network'), icon: 'globe-outline', color: '#FFE082', androidOnly: true },
     { id: 'parental', title: t('parental'), icon: 'lock-closed-outline', color: '#FFCCBC' },
     { id: 'updates', title: t('updates'), icon: 'sync-circle-outline', color: '#C8E6C9' },
-    { id: 'language', title: t('language'), icon: 'language-outline', color: '#E1BEE7' },
     
     // Row 2
+    { id: 'language', title: t('language'), icon: 'language-outline', color: '#E1BEE7' },
     { id: 'app_info', title: t('app_info'), icon: 'apps-outline', color: '#B3E5FC' },
     { id: 'clear_cache', title: t('clear_cache'), icon: 'trash-bin-outline', color: '#FFF9C4' },
     { id: 'manage_categories', title: t('manage_categories'), icon: 'options-outline', color: '#E1BEE7' },
@@ -94,6 +95,8 @@ export default function SettingsScreen() {
           onPress: () => hideGlobalAlert()
         }
       );
+    } else if (id === 'downloads') {
+      router.push('/downloads');
     } else if (id === 'manage_categories') {
       router.push('/manage-categories');
     } else if (id === 'strategy') {
@@ -133,6 +136,15 @@ export default function SettingsScreen() {
       </View>
       
       <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: insets.bottom + 80 }}>
+        <View style={[styles.deviceInfoCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+          <Text style={{ color: colors.text, fontSize: 18, fontWeight: 'bold' }}>
+            MAC Address: <Text selectable={true} style={{ color: colors.gold }}>{deviceId}</Text>
+          </Text>
+          <Text style={{ color: colors.text, fontSize: 18, fontWeight: 'bold' }}>
+            Device Key: <Text selectable={true} style={{ color: colors.gold }}>{deviceKey}</Text>
+          </Text>
+        </View>
+
         <View style={styles.grid}>
           {SETTINGS_CATEGORIES.map((cat, index) => {
             const itemWidth = `${100 / numColumns}%` as any;
@@ -189,6 +201,17 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 28,
     fontWeight: 'bold',
+  },
+  deviceInfoCard: {
+    padding: 16,
+    borderRadius: 12,
+    borderWidth: 1,
+    marginBottom: 20,
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 16,
   },
   grid: {
     flexDirection: 'row',

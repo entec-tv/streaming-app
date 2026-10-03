@@ -14,6 +14,7 @@ interface TVKeyboardProps {
   suggestions?: string[];
   onSuggestionPress?: (suggestion: string) => void;
   autoFocus?: boolean;
+  style?: any;
 }
 
 const EN_LAYOUT_LOWER = [
@@ -37,7 +38,7 @@ const AR_LAYOUT = [
   ['ئ', 'ء', 'ؤ', 'ر', 'لا', 'ى', 'ة', 'و', 'ز', 'ظ', 'ذ']
 ];
 
-export function TVKeyboard({ value, onChangeText, onSubmit, suggestions = [], onSuggestionPress, autoFocus }: TVKeyboardProps) {
+export function TVKeyboard({ value, onChangeText, onSubmit, suggestions = [], onSuggestionPress, autoFocus, style }: TVKeyboardProps) {
   const colors = useColors();
   const [language, setLanguage] = useState<'EN' | 'AR'>('EN');
   const [isShift, setIsShift] = useState(false);
@@ -78,7 +79,7 @@ export function TVKeyboard({ value, onChangeText, onSubmit, suggestions = [], on
   };
 
   return (
-    <View style={[styles.container, { backgroundColor: colors.surface }]}>
+    <View style={[styles.container, { backgroundColor: colors.surface }, style]}>
       {/* Suggestions Row */}
       {suggestions.length > 0 && (
         <ScrollView 

@@ -1,6 +1,6 @@
 import { Lineicons } from '@lineiconshq/react-native-lineicons';
 import { VolumeMuteBulk, VolumeLowBulk, VolumeHighBulk } from '@lineiconshq/free-icons';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   View,
@@ -17,6 +17,7 @@ import {
   useWindowDimensions,
   I18nManager,
   ScrollView,
+  BackHandler,
 } from 'react-native';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import * as Clipboard from 'expo-clipboard';
@@ -87,7 +88,18 @@ export default function PlayerScreen() {
 
   const streamUrl = decodeIfNeeded(activeChannel.streamUrl ?? '');
   const title = activeChannel.title || activeChannel.name || 'Streaming';
-  const isLive = String(activeChannel.isLive) === 'true';
+  
+  // Robust live stream detection:
+  // 1. Explicit parameter: isLive === 'true' or type === 'live'
+  // 2. Stream URL analysis: contains '/live/', or ends with '.ts' or '.ts?'
+  // 3. Known IPTV channel prefixes when not an explicit video file (.mp4, .mkv)
+  const lowerUrl = (streamUrl || '').toLowerCase();
+  const isVideoFile = lowerUrl.includes('.mp4') || lowerUrl.includes('.mkv') || lowerUrl.includes('.avi') || lowerUrl.includes('.mov');
+  const isExplicitLive = String(activeChannel.isLive) === 'true' || activeChannel.type === 'live';
+  const isUrlLive = lowerUrl.includes('/live/') || lowerUrl.endsWith('.ts') || lowerUrl.includes('.ts?') || lowerUrl.includes(':8000/live') || lowerUrl.includes(':8080/live');
+  const isChannelPrefix = /^(AR|BEIN|OSN|SSC|MBC|VIP|EG|KSA|NEWS|SPORT|AL |CH |TV )/i.test(title.trim());
+  
+  const isLive = isExplicitLive || isUrlLive || (!isVideoFile && isChannelPrefix && activeChannel.type !== 'vod' && activeChannel.type !== 'series');
   const current = activeChannel.current ?? '';
   const next = activeChannel.next ?? '';
 
@@ -142,6 +154,32 @@ export default function PlayerScreen() {
   const [selectedSubtitle, setSelectedSubtitle] = useState<any>(null);
   const [showTracksModal, setShowTracksModal] = useState(false);
   const [currentSubtitle, setCurrentSubtitle] = useState('');
+
+  // On-screen HUD for Volume, Seek (+10s/-10s), Play/Pause, and TV Channel Jump
+  const [hudMessage, setHudMessage] = useState<string | null>(null);
+  const [hudSubMessage, setHudSubMessage] = useState<string | null>(null);
+  const [hudIcon, setHudIcon] = useState<'volume' | 'seek-forward' | 'seek-backward' | 'channel' | 'play' | 'pause' | null>(null);
+  const hudOpacity = useRef(new Animated.Value(0)).current;
+  const hudTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showHud = useCallback((msg: string, icon?: 'volume' | 'seek-forward' | 'seek-backward' | 'channel' | 'play' | 'pause', sub?: string) => {
+    if (hudTimer.current) clearTimeout(hudTimer.current);
+    setHudMessage(msg);
+    setHudSubMessage(sub || null);
+    setHudIcon(icon || null);
+    Animated.timing(hudOpacity, { toValue: 1, duration: 150, useNativeDriver: true }).start();
+    hudTimer.current = setTimeout(() => {
+      Animated.timing(hudOpacity, { toValue: 0, duration: 250, useNativeDriver: true }).start(() => {
+        setHudMessage(null);
+        setHudSubMessage(null);
+        setHudIcon(null);
+      });
+    }, 1500);
+  }, [hudOpacity]);
+
+  // Channel number entry buffer for 0-9 keys (Direct TV Channel Jumping)
+  const channelNumberBuffer = useRef('');
+  const channelNumberTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Set last watched channel when player mounts
   useEffect(() => {
@@ -433,7 +471,7 @@ export default function PlayerScreen() {
     }
   }, [isPlayingStatus.isPlaying]);
 
-  const resetTimer = () => {
+  const resetTimer = (duration = 3500) => {
     if (hideTimer.current) clearTimeout(hideTimer.current);
     setShowControls(true);
     Animated.timing(controlsOpacity, { toValue: 1, duration: 200, useNativeDriver: true }).start();
@@ -442,10 +480,10 @@ export default function PlayerScreen() {
       Animated.timing(controlsOpacity, { toValue: 0, duration: 300, useNativeDriver: true }).start(() => {
         setShowControls(false);
       });
-    }, 5000);
+    }, duration);
   };
 
-  const showControlsNow = () => {
+  const showControlsNow = (duration = 4000) => {
     if (hideTimer.current) clearTimeout(hideTimer.current);
     setShowControls(true);
     controlsOpacity.setValue(1);
@@ -453,7 +491,7 @@ export default function PlayerScreen() {
       Animated.timing(controlsOpacity, { toValue: 0, duration: 300, useNativeDriver: true }).start(() => {
         setShowControls(false);
       });
-    }, 5000);
+    }, duration);
   };
 
   const handleBackgroundTap = () => {
@@ -463,14 +501,17 @@ export default function PlayerScreen() {
         setShowControls(false);
       });
     } else {
-      showControlsNow();
+      showControlsNow(4000);
     }
   };
 
   useEffect(() => {
-    resetTimer();
+    // When navigating into player screen, auto-hide elements after 3 seconds
+    resetTimer(3000);
     return () => { if (hideTimer.current) clearTimeout(hideTimer.current); };
   }, [isFocused]);
+
+  // Keyboard navigation is handled comprehensively below with on-screen HUD integration
 
   useEffect(() => {
     if (Platform.OS === 'web' || !player) return;
@@ -528,7 +569,40 @@ export default function PlayerScreen() {
     };
   }, []); // Run cleanup ONLY on unmount, not every second!
 
+  const handleExitPlayer = useCallback(() => {
+    if (Platform.OS !== 'web') {
+      const lastOri = useAppStore.getState().lastNonPlayerOrientation;
+      if (lastOri === 'portrait') {
+        ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT).catch(() => {});
+        setTimeout(() => {
+          ScreenOrientation.unlockAsync().catch(() => {});
+        }, 350);
+      } else {
+        ScreenOrientation.unlockAsync().catch(() => {});
+      }
+    }
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/(tabs)');
+    }
+  }, []);
+
   useEffect(() => {
+    const onHardwareBack = () => {
+      handleExitPlayer();
+      return true;
+    };
+    const sub = BackHandler.addEventListener('hardwareBackPress', onHardwareBack);
+    return () => sub.remove();
+  }, [handleExitPlayer]);
+
+  useEffect(() => {
+    // Lock screen orientation to LANDSCAPE whenever player is active
+    if (Platform.OS !== 'web') {
+      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE).catch(() => {});
+    }
+
     const enableImmersive = async () => {
       if (Platform.OS === 'android') {
         try {
@@ -545,18 +619,23 @@ export default function PlayerScreen() {
     return () => {
       if (hideTimer.current) clearTimeout(hideTimer.current);
       
-      // Restore UI on unmount
-      setTimeout(async () => {
-        if (Platform.OS === 'android') {
-          try {
-            await NavigationBar.setVisibilityAsync("visible");
-          } catch(e) {}
-        }
-        if (Platform.OS !== 'web') {
-          RNStatusBar.setHidden(false, 'none');
-        }
-      }, 50);
+      // Do not restore UI on unmount to keep immersive mode globally
       setIsPlayerOpen(false);
+
+      if (Platform.OS !== 'web') {
+        const lastOri = useAppStore.getState().lastNonPlayerOrientation;
+        if (lastOri === 'portrait') {
+          ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT).then(() => {
+            setTimeout(() => {
+              ScreenOrientation.unlockAsync().catch(() => {});
+            }, 350);
+          }).catch(() => {
+            ScreenOrientation.unlockAsync().catch(() => {});
+          });
+        } else {
+          ScreenOrientation.unlockAsync().catch(() => {});
+        }
+      }
     };
   }, []);
 
@@ -646,8 +725,24 @@ export default function PlayerScreen() {
         setVolume(ratio);
         if (Platform.OS === 'web') {
           webPlayerRef.current?.setVolume(ratio);
+          if (ratio > 0 && isMuted) {
+            webPlayerRef.current?.setMuted(false);
+            setIsMuted(false);
+          } else if (ratio === 0 && !isMuted) {
+            webPlayerRef.current?.setMuted(true);
+            setIsMuted(true);
+          }
         } else {
-          if (player) player.volume = ratio;
+          if (player) {
+            player.volume = ratio;
+            if (ratio > 0 && player.muted) {
+              player.muted = false;
+              setIsMuted(false);
+            } else if (ratio === 0 && !player.muted) {
+              player.muted = true;
+              setIsMuted(true);
+            }
+          }
         }
       },
     })
@@ -688,12 +783,14 @@ export default function PlayerScreen() {
     const prevIdx = isSeries ? playbackIndex - 1 : (playbackIndex - 1 + playbackQueue.length) % playbackQueue.length;
     setPlaybackIndex(prevIdx);
     const ch = playbackQueue[prevIdx];
+    const chUrl = decodeIfNeeded(ch.streamUrl || '').toLowerCase();
+    const chIsLive = ch.isLive || ch.type === 'live' || chUrl.includes('/live/') || chUrl.endsWith('.ts') || chUrl.includes('.ts?');
     setActiveChannel(prev => ({
       ...prev,
       id: ch.id,
       streamUrl: ch.streamUrl,
       title: ch.name || ch.title,
-      isLive: ch.isLive ? 'true' : 'false',
+      isLive: chIsLive ? 'true' : 'false',
       current: ch.current || '',
       next: ch.next || '',
       quality: ch.quality || 'HD',
@@ -711,12 +808,14 @@ export default function PlayerScreen() {
     const nextIdx = isSeries ? playbackIndex + 1 : (playbackIndex + 1) % playbackQueue.length;
     setPlaybackIndex(nextIdx);
     const ch = playbackQueue[nextIdx];
+    const chUrl = decodeIfNeeded(ch.streamUrl || '').toLowerCase();
+    const chIsLive = ch.isLive || ch.type === 'live' || chUrl.includes('/live/') || chUrl.endsWith('.ts') || chUrl.includes('.ts?');
     setActiveChannel(prev => ({
       ...prev,
       id: ch.id,
       streamUrl: ch.streamUrl,
       title: ch.name || ch.title,
-      isLive: ch.isLive ? 'true' : 'false',
+      isLive: chIsLive ? 'true' : 'false',
       current: ch.current || '',
       next: ch.next || '',
       quality: ch.quality || 'HD',
@@ -746,13 +845,23 @@ export default function PlayerScreen() {
 
   const toggleMute = () => {
     if (Platform.OS === 'web') {
-      setIsMuted(!isMuted);
+      if (webPlayerRef.current) {
+        const next = webPlayerRef.current.toggleMute();
+        setIsMuted(next);
+      } else {
+        setIsMuted(!isMuted);
+      }
+      showControlsNow();
       return;
     }
     if (!player) return;
     const next = !isMuted;
     player.muted = next;
+    if (!next && player.volume === 0) {
+      player.volume = 1;
+    }
     setIsMuted(next);
+    showControlsNow();
   };
 
   const toggleAspectMode = () => {
@@ -803,7 +912,208 @@ export default function PlayerScreen() {
     }
   };
 
+  // Volume HUD helper
+  const handleVolumeDelta = useCallback((delta: number) => {
+    setVolume(prev => {
+      const next = Math.max(0, Math.min(1, Math.round((prev + delta) * 20) / 20));
+      if (Platform.OS === 'web') {
+        webPlayerRef.current?.setVolume(next);
+        if (next > 0 && isMuted) {
+          webPlayerRef.current?.setMuted(false);
+          setIsMuted(false);
+        } else if (next === 0 && !isMuted) {
+          webPlayerRef.current?.setMuted(true);
+          setIsMuted(true);
+        }
+      } else if (player) {
+        player.volume = next;
+        if (next > 0 && player.muted) {
+          player.muted = false;
+          setIsMuted(false);
+        } else if (next === 0 && !player.muted) {
+          player.muted = true;
+          setIsMuted(true);
+        }
+      }
+      showHud(`${Math.round(next * 100)}%`, 'volume');
+      return next;
+    });
+  }, [isMuted, player, showHud]);
+
+  // Relative Seek with HUD
+  const handleSeekRelative = useCallback((secs: number) => {
+    handleSeekBy(secs);
+    showHud(secs > 0 ? `+${secs} ثانية` : `${secs} ثانية`, secs > 0 ? 'seek-forward' : 'seek-backward');
+    showControlsNow(2500);
+  }, [handleSeekBy, showHud]);
+
+  // Play / Pause toggle with HUD
+  const handlePlayPauseToggle = useCallback(() => {
+    togglePlay();
+    showHud(!isPlaying ? 'تشغيل' : 'إيقاف مؤقت', !isPlaying ? 'play' : 'pause');
+    showControlsNow(2500);
+  }, [isPlaying, togglePlay, showHud]);
+
+  // Mute toggle with HUD
+  const handleMuteToggle = useCallback(() => {
+    toggleMute();
+    showHud(!isMuted ? 'كتم الصوت' : 'تشغيل الصوت', 'volume');
+    showControlsNow(2500);
+  }, [isMuted, toggleMute, showHud]);
+
+  // Fullscreen toggle with HUD
+  const handleFullscreenToggle = useCallback(() => {
+    if (Platform.OS === 'web') {
+      const isFs = !!(document.fullscreenElement || (document as any).webkitFullscreenElement);
+      if (isFs) {
+        webPlayerRef.current?.exitFullscreen();
+        showHud('إنهاء ملء الشاشة');
+      } else {
+        webPlayerRef.current?.requestFullscreen();
+        showHud('ملء الشاشة');
+      }
+    }
+  }, [showHud]);
+
+  // Direct channel number typing (0-9)
+  const handleNumberInput = useCallback((digit: string) => {
+    if (!isLive || playbackQueue.length === 0) return;
+    if (channelNumberTimer.current) clearTimeout(channelNumberTimer.current);
+
+    channelNumberBuffer.current = `${channelNumberBuffer.current}${digit}`;
+    const targetNum = parseInt(channelNumberBuffer.current, 10);
+
+    showHud(`قناة ${channelNumberBuffer.current}`, 'channel', 'جارِ الانتقال...');
+
+    channelNumberTimer.current = setTimeout(() => {
+      channelNumberBuffer.current = '';
+      if (isNaN(targetNum) || targetNum <= 0) return;
+
+      let foundIndex = playbackQueue.findIndex(ch => ch.num === targetNum || (ch as any).number === targetNum);
+
+      if (foundIndex === -1 && targetNum <= playbackQueue.length) {
+        foundIndex = targetNum - 1;
+      }
+
+      if (foundIndex >= 0 && foundIndex < playbackQueue.length) {
+        setPlaybackIndex(foundIndex);
+        const ch = playbackQueue[foundIndex];
+        const chUrl = decodeIfNeeded(ch.streamUrl || '').toLowerCase();
+        const chIsLive = ch.isLive || ch.type === 'live' || chUrl.includes('/live/') || chUrl.endsWith('.ts') || chUrl.includes('.ts?');
+        setActiveChannel(prev => ({
+          ...prev,
+          id: ch.id,
+          streamUrl: ch.streamUrl,
+          title: ch.name || ch.title,
+          isLive: chIsLive ? 'true' : 'false',
+          current: ch.current || '',
+          next: ch.next || '',
+          quality: ch.quality || 'HD',
+          logo: ch.logo || ch.poster || '',
+          category: ch.category || '',
+          poster: ch.poster ? base64Encode(ch.poster) : '',
+          backdrop: ch.backdrop ? base64Encode(ch.backdrop) : '',
+        }));
+        showHud(ch.name || ch.title || `قناة ${targetNum}`, 'channel');
+      } else {
+        showHud('القناة غير موجودة', 'channel');
+      }
+    }, 1200);
+  }, [isLive, playbackQueue, setPlaybackIndex, showHud]);
+
+  // Comprehensive keyboard navigation on Web/Desktop
+  useEffect(() => {
+    if (Platform.OS === 'web') {
+      const handleKeyDown = (e: KeyboardEvent) => {
+        const activeTag = (document.activeElement as HTMLElement)?.tagName;
+        if (['INPUT', 'TEXTAREA'].includes(activeTag)) return;
+
+        switch (e.key) {
+          case ' ':
+          case 'k':
+          case 'K':
+            e.preventDefault();
+            handlePlayPauseToggle();
+            break;
+          case 'ArrowLeft':
+            e.preventDefault();
+            if (isLive) {
+              handlePrevChannel();
+            } else {
+              handleSeekRelative(-10);
+            }
+            break;
+          case 'ArrowRight':
+            e.preventDefault();
+            if (isLive) {
+              handleNextChannel();
+            } else {
+              handleSeekRelative(10);
+            }
+            break;
+          case 'ArrowUp':
+            e.preventDefault();
+            handleVolumeDelta(0.05);
+            break;
+          case 'ArrowDown':
+            e.preventDefault();
+            handleVolumeDelta(-0.05);
+            break;
+          case 'm':
+          case 'M':
+            e.preventDefault();
+            handleMuteToggle();
+            break;
+          case 'f':
+          case 'F':
+            e.preventDefault();
+            handleFullscreenToggle();
+            break;
+          case 'PageUp':
+          case '[':
+            e.preventDefault();
+            handlePrevChannel();
+            break;
+          case 'PageDown':
+          case ']':
+            e.preventDefault();
+            handleNextChannel();
+            break;
+          case 'Escape':
+          case 'Backspace':
+            e.preventDefault();
+            handleExitPlayer();
+            break;
+          default:
+            if (e.key >= '0' && e.key <= '9') {
+              e.preventDefault();
+              handleNumberInput(e.key);
+            } else if (!showControlsRef.current) {
+              showControlsNow(3500);
+            }
+            break;
+        }
+      };
+
+      window.addEventListener('keydown', handleKeyDown);
+      return () => window.removeEventListener('keydown', handleKeyDown);
+    }
+  }, [
+    handlePlayPauseToggle,
+    handleSeekRelative,
+    handleVolumeDelta,
+    handleMuteToggle,
+    handleFullscreenToggle,
+    handlePrevChannel,
+    handleNextChannel,
+    handleExitPlayer,
+    handleNumberInput,
+    isLive
+  ]);
+
   const progress = duration > 0 ? (currentTime / duration) : 0;
+
+  const isLandscape = width > height;
 
   if (!streamUrl) {
     return (
@@ -816,11 +1126,6 @@ export default function PlayerScreen() {
         </TVFocusable>
       </View>
     );
-  }
-
-  const isLandscape = width > height;
-  if (!isLandscape && Platform.OS !== 'web' && !Platform.isTV) {
-    return <View style={{ flex: 1, backgroundColor: '#000' }} />;
   }
 
   return (
@@ -847,6 +1152,12 @@ export default function PlayerScreen() {
               onSubtitleChange={setCurrentSubtitle}
               paused={!isPlaying}
               muted={isMuted}
+              onMuteChange={(mutedState) => {
+                setIsMuted(mutedState);
+              }}
+              onVolumeChange={(vol) => {
+                setVolume(vol);
+              }}
               aspectMode={aspectMode}
               preferredPlayer={isLive ? settings.liveTvPlayer : settings.vodPlayer}
               style={[StyleSheet.absoluteFill, { width: '100%', height: '100%' }]}
@@ -891,7 +1202,7 @@ export default function PlayerScreen() {
                 if (playbackQueue.length > 1) {
                   handleNextChannel();
                 } else {
-                  if (router.canGoBack()) { router.back(); } else { router.replace('/(tabs)'); };
+                  handleExitPlayer();
                 }
               }}
             />
@@ -921,6 +1232,32 @@ export default function PlayerScreen() {
         )}
       </View>
 
+      {/* ── Layer 1.5: HUD Overlay (Volume, Seek, TV Channel Jump) ── */}
+      {hudMessage && (
+        <Animated.View
+          style={[
+            styles.hudContainer,
+            { opacity: hudOpacity }
+          ]}
+          pointerEvents="none"
+        >
+          {hudIcon === 'volume' && (
+            <Ionicons
+              name={volume === 0 || isMuted ? "volume-mute" : volume < 0.5 ? "volume-low" : "volume-high"}
+              size={34}
+              color="#F4C542"
+            />
+          )}
+          {hudIcon === 'seek-forward' && <Ionicons name="play-forward" size={34} color="#F4C542" />}
+          {hudIcon === 'seek-backward' && <Ionicons name="play-back" size={34} color="#F4C542" />}
+          {hudIcon === 'play' && <Ionicons name="play" size={34} color="#F4C542" />}
+          {hudIcon === 'pause' && <Ionicons name="pause" size={34} color="#F4C542" />}
+          {hudIcon === 'channel' && <Ionicons name="tv" size={34} color="#F4C542" />}
+          <Text style={styles.hudText}>{hudMessage}</Text>
+          {hudSubMessage && <Text style={styles.hudSubText}>{hudSubMessage}</Text>}
+        </Animated.View>
+      )}
+
       {/* ── Layer 2: Buffering spinner ── */}
       {isBuffering && !hasError && (
         <View style={styles.bufferingOverlay} pointerEvents="none">
@@ -933,16 +1270,23 @@ export default function PlayerScreen() {
         disableBorder 
         focusable={!showControls} 
         hasTVPreferredFocus={!showControls}
-        style={[StyleSheet.absoluteFill, { width: '100%', height: '100%' }]} 
+        style={[StyleSheet.absoluteFill, { width: '100%', height: '100%', zIndex: showControls ? 1 : 10 }]} 
         onPress={handleBackgroundTap} 
       />
 
       {/* ── Layer 4: Controls overlay (box-none so tap layer still works in empty areas) ── */}
       {showControls && (
         <Animated.View
-          style={[StyleSheet.absoluteFill, { opacity: controlsOpacity }]}
+          style={[StyleSheet.absoluteFill, { opacity: controlsOpacity, zIndex: 20 }]}
           pointerEvents="box-none"
         >
+          {/* Backdrop inside controls to catch taps on empty space on mobile and hide controls */}
+          <TVFocusable
+            disableBorder
+            focusable={false}
+            style={[StyleSheet.absoluteFill, { zIndex: -1 }]}
+            onPress={handleBackgroundTap}
+          />
           {/* Decorative gradients - no touch */}
           <LinearGradient
             colors={['rgba(0,0,0,0.85)', 'transparent']}
@@ -957,17 +1301,11 @@ export default function PlayerScreen() {
 
           {/* Top bar */}
           <View
-            style={[styles.topBar, { paddingTop: Platform.OS === 'ios' ? insets.top + 8 : 20 }]}
+            style={[styles.topBar, { paddingTop: Platform.OS === 'ios' ? insets.top + 8 : Math.max(insets.top + 8, 20) }]}
             pointerEvents="box-none"
           >
             <TVFocusable 
-              onPress={() => {
-                if (router.canGoBack()) {
-                  router.back();
-                } else {
-                  router.replace('/(tabs)');
-                }
-              }} 
+              onPress={handleExitPlayer} 
               style={({ focused }: any) => [
                 styles.iconBtn,
                 focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderWidth: 3, borderColor: '#FFF' }
@@ -996,7 +1334,7 @@ export default function PlayerScreen() {
           </View>
 
           {/* Bottom bar */}
-          <View style={styles.bottomBar} pointerEvents="box-none">
+          <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom + 12, 24) }]} pointerEvents="box-none">
             {isLive ? (
               <View style={[styles.liveRow, { marginBottom: 16 }]} pointerEvents="none">
                 <View style={styles.liveBadge}>
@@ -1065,10 +1403,10 @@ export default function PlayerScreen() {
                       styles.iconBtn,
                       focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderWidth: 3, borderColor: '#FFF' }
                     ]} 
-                    onPress={() => handleSeekBy(-10)}
+                    onPress={() => handleSeekBy(-30)}
                   >
                     {({ focused }: any) => (
-                      <Lineicons icon={ShiftLeftBulk} size={20} color={focused ? "#0A0A0A" : "#FFF"} />
+                      <MaterialCommunityIcons name="rewind-30" size={24} color={focused ? "#0A0A0A" : "#FFF"} />
                     )}
                   </TVFocusable>
                 )}
@@ -1094,10 +1432,10 @@ export default function PlayerScreen() {
                       styles.iconBtn,
                       focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderWidth: 3, borderColor: '#FFF' }
                     ]} 
-                    onPress={() => handleSeekBy(10)}
+                    onPress={() => handleSeekBy(30)}
                   >
                     {({ focused }: any) => (
-                      <Lineicons icon={ShiftRightBulk} size={20} color={focused ? "#0A0A0A" : "#FFF"} />
+                      <MaterialCommunityIcons name="fast-forward-30" size={24} color={focused ? "#0A0A0A" : "#FFF"} />
                     )}
                   </TVFocusable>
                 )}
@@ -1149,12 +1487,26 @@ export default function PlayerScreen() {
                     styles.iconBtn,
                     focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderWidth: 3, borderColor: '#FFF' }
                   ]} 
+                  onPress={toggleMute}
+                >
+                  {({ focused }: any) => (
+                    <Ionicons name={isMuted ? "volume-mute" : "volume-high"} size={20} color={focused ? "#0A0A0A" : (isMuted ? '#E53935' : '#FFF')} />
+                  )}
+                </TVFocusable>
+
+                <TVFocusable 
+                  style={({ focused }: any) => [
+                    styles.iconBtn,
+                    focused && { transform: [{ scale: 1.1 }], backgroundColor: colors.gold, borderWidth: 3, borderColor: '#FFF' }
+                  ]} 
                   onPress={handleToggleFavorite}
                 >
                   {({ focused }: any) => (
                     <Lineicons icon={HeartBulk} size={20} color={focused ? "#0A0A0A" : (isFavorite ? '#E53935' : '#FFF')} fill={isFavorite ? '#E53935' : 'transparent'} />
                   )}
                 </TVFocusable>
+
+
               </View>
 
             </View>
@@ -1174,9 +1526,9 @@ export default function PlayerScreen() {
               <View style={{ width: 6, height: 120, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 3 }}>
                  <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: `${volume * 100}%`, backgroundColor: colors.gold, borderRadius: 3 }} />
               </View>
-              <View style={{ marginTop: 16 }} pointerEvents="none">
-                <Lineicons icon={volume === 0 ? VolumeMuteBulk : volume > 0.5 ? VolumeHighBulk : VolumeLowBulk} size={20} color="#FFF" />
-              </View>
+              <TVFocusable onPress={toggleMute} style={{ marginTop: 16 }} disableBorder>
+                <Lineicons icon={isMuted || volume === 0 ? VolumeMuteBulk : volume > 0.5 ? VolumeHighBulk : VolumeLowBulk} size={20} color={isMuted ? "#E53935" : "#FFF"} />
+              </TVFocusable>
             </View>
           )}
         </Animated.View>
@@ -1410,6 +1762,8 @@ const styles = StyleSheet.create({
   },
   promptButtons: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
     gap: 16,
   },
   promptBtn: {
@@ -1625,8 +1979,9 @@ const styles = StyleSheet.create({
   modalContent: {
     backgroundColor: '#111',
     borderRadius: 16,
-    padding: 24,
-    width: 600,
+    padding: 20,
+    width: '90%',
+    maxWidth: 600,
     maxHeight: '80%',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.1)',
@@ -1674,6 +2029,38 @@ const styles = StyleSheet.create({
   trackBtnTextActive: {
     color: '#D4A843',
     fontWeight: 'bold',
+  },
+  hudContainer: {
+    position: 'absolute',
+    top: '18%',
+    alignSelf: 'center',
+    backgroundColor: 'rgba(15, 20, 30, 0.88)',
+    borderRadius: 20,
+    paddingHorizontal: 28,
+    paddingVertical: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: 'rgba(244, 197, 66, 0.4)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.5,
+    shadowRadius: 16,
+    elevation: 20,
+    zIndex: 9999,
+    minWidth: 140,
+    gap: 8,
+  },
+  hudText: {
+    color: '#FFF',
+    fontSize: 22,
+    fontWeight: 'bold',
+    textAlign: 'center',
+  },
+  hudSubText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 13,
+    textAlign: 'center',
   },
 });
 

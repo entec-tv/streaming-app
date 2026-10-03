@@ -24,7 +24,11 @@ export default function LanguageSelectorScreen() {
 
   const handleSave = () => {
     setLanguage(selectedLang as 'en' | 'ar');
-    router.back();
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/(tabs)/settings');
+    }
   };
 
   const isSmallScreen = width < 600;

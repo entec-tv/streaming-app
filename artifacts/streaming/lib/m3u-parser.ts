@@ -41,8 +41,27 @@ export function parseM3U(m3uContent: string) {
     } else if (!line.startsWith('#')) {
       // URL line
       if (currentInfo.name) {
+        const lowerUrl = line.toLowerCase();
+        let determinedType = currentInfo.type;
+        let determinedIsLive = currentInfo.isLive;
+
+        if (lowerUrl.includes('/live/') || lowerUrl.endsWith('.ts') || lowerUrl.includes('.ts?')) {
+          determinedType = 'live';
+          determinedIsLive = true;
+        } else if (lowerUrl.includes('/movie/') || lowerUrl.includes('.mp4') || lowerUrl.includes('.mkv') || lowerUrl.includes('.avi')) {
+          determinedType = 'vod';
+          determinedIsLive = false;
+        } else if (lowerUrl.includes('/series/')) {
+          determinedType = 'series';
+          determinedIsLive = false;
+        }
+
         channels.push({
           ...currentInfo,
+          type: determinedType,
+          isLive: determinedIsLive,
+          current: determinedIsLive ? (currentInfo.current || 'Live Broadcast') : currentInfo.name,
+          next: determinedIsLive ? (currentInfo.next || 'Up Next') : '',
           id: base64Encode(line).substring(0, 16),
           streamUrl: line
         });

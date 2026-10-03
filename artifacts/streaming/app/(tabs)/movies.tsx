@@ -18,6 +18,48 @@ import { useIsFocused } from '@react-navigation/native';
 
 
 
+const normalizeTitle = (str: string) => {
+  return str
+    .toLowerCase()
+    .replace(/^[a-z]{2,4}\s*[:|\-]\s*/i, '')
+    .replace(/\[.*?\]/g, '')
+    .replace(/\(.*?\)/g, '')
+    .replace(/\b(4k|fhd|hd|uhd|hevc|1080p|720p|h264|h265|bluray|web-dl|vod)\b/gi, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
+const isTargetMatch = (item: any, target: { id?: string | number; name?: string } | null) => {
+  if (!item || !target) return false;
+
+  const itemId = String(item.id || '').trim();
+  const targetId = String(target.id || '').trim();
+
+  // 1. Direct ID match
+  if (targetId && itemId && (itemId.toLowerCase() === targetId.toLowerCase())) return true;
+
+  // 2. Strip prefix ID match (xt_vod_123 vs 123)
+  if (targetId && itemId) {
+    const cleanItemId = itemId.replace(/^(xt_|)(vod_|series_|live_)/i, '');
+    const cleanTargetId = targetId.replace(/^(xt_|)(vod_|series_|live_)/i, '');
+    if (cleanItemId && cleanTargetId && cleanItemId === cleanTargetId) return true;
+  }
+
+  // 3. Name matching
+  const itemTitle = (item.title || item.name || '').trim();
+  const targetName = (target.name || '').trim();
+
+  if (targetName && itemTitle) {
+    if (itemTitle.toLowerCase() === targetName.toLowerCase()) return true;
+    const normItem = normalizeTitle(itemTitle);
+    const normTarget = normalizeTitle(targetName);
+    if (normItem && normTarget && normItem === normTarget) return true;
+  }
+
+  return false;
+};
+
 export default function MoviesScreen() {
   const isFocused = useIsFocused();
   const colors = useColors();
@@ -27,6 +69,7 @@ export default function MoviesScreen() {
   const router = useRouter();
   const { width, height } = useWindowDimensions();
   const rawIsLandscape = width > height;
+  const isWindowsWeb = Platform.OS === 'web';
   const rawIsLargeScreen = width >= 1024 || Platform.isTV;
   const rawNumColumns = rawIsLargeScreen ? 4 : 3;
   const rawMobileNumColumns = Math.max(2, Math.floor((width - 40) / 130));
@@ -55,12 +98,26 @@ export default function MoviesScreen() {
   const activeCategories = useAppStore((s) => s.activeCategories);
   const getChannelsForCategory = useAppStore((s) => s.getChannelsForCategory);
   const setPlaybackQueue = useAppStore((s) => s.setPlaybackQueue);
+  const refreshCounter = useAppStore((s) => s.refreshCounter);
+  const isNetworkOnline = useAppStore((s) => s.isNetworkOnline);
+  const favorites = useAppStore((s) => s.favorites) || [];
+  const favoriteItems = useAppStore((s) => s.favoriteItems) || [];
+  const continueWatching = useAppStore((s) => s.continueWatching);
+  const categoryCounts = useAppStore((s) => s.categoryCounts);
 
-  const [selectedCategory, setSelectedCategory] = useState<{ id: string; name: string } | null>(null);
+  const [selectedCategory, setSelectedCategory] = useState<{ id: string; name: string; count?: number } | null>(null);
+  const [selectedMovieId, setSelectedMovieId] = useState<string | null>(null);
+  const pendingTargetRef = useRef<{ id?: string; name?: string } | null>(null);
   const [localMovies, setLocalMovies] = useState<Movie[]>([]);
+  const localMoviesRef = useRef<Movie[]>([]);
+  useEffect(() => {
+    localMoviesRef.current = localMovies;
+  }, [localMovies]);
   const [displayCount, setDisplayCount] = useState(50);
   const [loading, setLoading] = useState(false);
+  const activeRequestId = useRef(0);
   const hasDefaulted = useRef(false);
+  const lastLoadedCategoryId = useRef<string | null>(null);
   const flatListRef = useRef<FlatList>(null);
   const categoryListRef = useRef<FlatList>(null);
 
@@ -81,13 +138,14 @@ export default function MoviesScreen() {
   const finalVodCats = useMemo(() => {
     if (!activeCategories?.vod) return [];
     
-    let filtered = activeCategories.vod.filter((c: any) => !prefs.hiddenIds.includes(c.id));
+    const hiddenSet = new Set((prefs.hiddenIds || []).map(String));
+    let filtered = activeCategories.vod.filter((c: any) => !hiddenSet.has(String(c.id)));
     
     if (prefs.vodOrder && prefs.vodOrder.length > 0) {
-      const orderMap = new Map<string, number>(prefs.vodOrder.map((id, index) => [id, index]));
+      const orderMap = new Map<string, number>(prefs.vodOrder.map((id, index) => [String(id), index]));
       filtered.sort((a: any, b: any) => {
-        const idxA = orderMap.has(a.id) ? orderMap.get(a.id)! : 999999;
-        const idxB = orderMap.has(b.id) ? orderMap.get(b.id)! : 999999;
+        const idxA = orderMap.has(String(a.id)) ? orderMap.get(String(a.id))! : 999999;
+        const idxB = orderMap.has(String(b.id)) ? orderMap.get(String(b.id))! : 999999;
         return idxA - idxB;
       });
     }
@@ -97,14 +155,34 @@ export default function MoviesScreen() {
   const [showCategoryKeyboard, setShowCategoryKeyboard] = useState(false);
   const [showMovieKeyboard, setShowMovieKeyboard] = useState(false);
 
+  const isVodItem = useCallback((i: any) => {
+    if (!i) return false;
+    if (i.type === 'vod' || i.type === 'movie') return true;
+    if (typeof i.id === 'string' && (i.id.startsWith('xt_vod_') || i.id.startsWith('vod_') || i.id.startsWith('movie_'))) return true;
+    if (typeof i.streamUrl === 'string' && i.streamUrl.includes('/movie/')) return true;
+    return false;
+  }, []);
+
   const categories = useMemo(() => {
+    const vodCounts = categoryCounts?.vod || {};
+    const vodTotal = categoryCounts?.totals?.vod;
+    const favItemsCount = favoriteItems.filter(isVodItem).length;
+    const favIdsCount = (favorites || []).filter((id: any) => typeof id === 'string' && (id.startsWith('xt_vod_') || id.startsWith('vod_') || id.startsWith('movie_'))).length;
+    const vodFavCount = Math.max(favItemsCount, favIdsCount);
+
     const SPECIAL_CATEGORIES = [
-      { id: '__all__', name: t('all') || 'All' },
+      { id: '__all__', name: t('all') || 'All', count: vodTotal },
       { id: '__recent__', name: t('continue_watching') || 'Continue Watching' },
-      { id: '__favorites__', name: t('favorites') || 'Favorites' }
+      { id: '__favorites__', name: t('favorites') || 'Favorites', count: vodFavCount }
     ];
-    return [...SPECIAL_CATEGORIES, ...finalVodCats];
-  }, [finalVodCats, t]);
+
+    const mappedFiltered = finalVodCats.map((c: any) => ({
+      ...c,
+      count: vodCounts[String(c.id)] ?? vodCounts[c.name] ?? c.count
+    }));
+
+    return [...SPECIAL_CATEGORIES, ...mappedFiltered];
+  }, [finalVodCats, t, categoryCounts, favoriteItems, favorites, isVodItem]);
 
   const filteredCategories = useMemo(() => {
     if (!categorySearch.trim()) return categories;
@@ -112,26 +190,79 @@ export default function MoviesScreen() {
     return categories.filter((c: any) => c.name.toLowerCase().includes(q));
   }, [categories, categorySearch]);
 
+  const [globalSearchResults, setGlobalSearchResults] = useState<any[]>([]);
+  const [isSearchingGlobal, setIsSearchingGlobal] = useState(false);
+
+  useEffect(() => {
+    if (selectedCategory?.id !== '__all__' || !movieSearch.trim()) {
+      setGlobalSearchResults([]);
+      setIsSearchingGlobal(false);
+      return;
+    }
+
+    const q = movieSearch.trim();
+    let isCurrent = true;
+    setIsSearchingGlobal(true);
+
+    const timer = setTimeout(async () => {
+      try {
+        const results = await useAppStore.getState().searchChannels(q, 'vod', 250);
+        if (isCurrent) {
+          const mapped = results.map((c: Channel) => ({
+            id: c.id,
+            title: c.name,
+            poster: c.logo || `https://ui-avatars.com/api/?name=${encodeURIComponent(c.name)}&background=1A1A1A&color=D4A843&bold=true&size=300&format=svg`,
+            backdrop: c.logo,
+            rating: 0,
+            year: 0,
+            duration: '',
+            quality: c.quality,
+            genres: [c.category],
+            category: c.category,
+            categoryId: c.categoryId,
+            description: '',
+            streamUrl: c.streamUrl,
+          }));
+          setGlobalSearchResults(mapped);
+        }
+      } catch (e) {
+        if (isCurrent) setGlobalSearchResults([]);
+      } finally {
+        if (isCurrent) setIsSearchingGlobal(false);
+      }
+    }, 200);
+
+    return () => {
+      isCurrent = false;
+      clearTimeout(timer);
+    };
+  }, [movieSearch, selectedCategory?.id]);
+
   const filteredMovies = useMemo(() => {
     if (!movieSearch.trim()) return localMovies;
+    if (selectedCategory?.id === '__all__') {
+      return globalSearchResults;
+    }
     const q = movieSearch.toLowerCase().trim();
     return localMovies.filter(m => m.title.toLowerCase().includes(q));
-  }, [localMovies, movieSearch]);
+  }, [localMovies, movieSearch, selectedCategory?.id, globalSearchResults]);
 
   const moveCategory = (direction: 'up' | 'down') => {
     if (!selectedCategory || selectedCategory.id.startsWith('__')) return;
-    
-    let currentList = activeCategories?.vod?.filter((c: any) => !prefs.hiddenIds.includes(c.id)) || [];
+    if (!activePlaylistId) return;
+
+    const hiddenSet = new Set((prefs.hiddenIds || []).map(String));
+    let currentList = (activeCategories?.vod || []).filter((c: any) => !hiddenSet.has(String(c.id)));
     if (prefs.vodOrder && prefs.vodOrder.length > 0) {
-      const orderMap = new Map<string, number>(prefs.vodOrder.map((id, index) => [id, index]));
+      const orderMap = new Map<string, number>(prefs.vodOrder.map((id, index) => [String(id), index]));
       currentList.sort((a: any, b: any) => {
-        const idxA = orderMap.has(a.id) ? orderMap.get(a.id)! : 999999;
-        const idxB = orderMap.has(b.id) ? orderMap.get(b.id)! : 999999;
+        const idxA = orderMap.has(String(a.id)) ? orderMap.get(String(a.id))! : 999999;
+        const idxB = orderMap.has(String(b.id)) ? orderMap.get(String(b.id))! : 999999;
         return idxA - idxB;
       });
     }
 
-    const index = currentList.findIndex((c: any) => c.id === selectedCategory.id);
+    const index = currentList.findIndex((c: any) => String(c.id) === String(selectedCategory.id));
     if (index === -1) return;
     
     if (direction === 'up' && index === 0) return;
@@ -142,14 +273,65 @@ export default function MoviesScreen() {
     currentList[index] = currentList[swapIndex];
     currentList[swapIndex] = temp;
 
-    const newOrder = currentList.map((c: any) => c.id);
+    const newOrder = currentList.map((c: any) => String(c.id));
     updateCategoryPreferences(activePlaylistId, { vodOrder: newOrder });
   };
 
-  const loadCategory = useCallback(async (cat: { id: string; name: string }) => {
+  const scrollAndFocusTarget = useCallback((targetId: string, targetIdx: number, numCols: number) => {
+    const row = Math.floor(targetIdx / numCols);
+    const rowHeight = numCols >= 3 ? 380 : 240;
+    const targetOffset = Math.max(0, (row - 1) * rowHeight);
+
+    if (Platform.OS === 'web') {
+      flatListRef.current?.scrollToOffset({ offset: targetOffset, animated: false });
+      let attempts = 0;
+      const cleanId = String(targetId).replace(/^(xt_|)(vod_|series_|live_)/i, '');
+      const timer = setInterval(() => {
+        attempts++;
+        const el = document.getElementById(`card_${targetId}`) || 
+                   document.getElementById(`card_xt_vod_${cleanId}`) ||
+                   document.getElementById(`card_xt_series_${cleanId}`) ||
+                   document.getElementById(`card_${cleanId}`) ||
+                   document.querySelector(`[data-card-id="${targetId}"]`) ||
+                   document.querySelector(`[data-card-id="${cleanId}"]`);
+
+        if (el) {
+          clearInterval(timer);
+          try {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+            const focusable = el.getAttribute('tabindex') !== null ? el : el.querySelector<HTMLElement>('[tabindex], [data-focusable="true"]');
+            (focusable || el as HTMLElement)?.focus();
+          } catch (e) {}
+        } else if (attempts >= 25) {
+          clearInterval(timer);
+          try {
+            flatListRef.current?.scrollToOffset({ offset: Math.max(0, row * rowHeight), animated: true });
+          } catch (e) {}
+        }
+      }, 50);
+    } else {
+      setTimeout(() => {
+        try {
+          flatListRef.current?.scrollToIndex({ index: targetIdx, animated: true, viewPosition: 0.5 });
+        } catch (e) {
+          try {
+            flatListRef.current?.scrollToOffset({ offset: Math.max(0, row * rowHeight), animated: true });
+          } catch (err) {}
+        }
+      }, 300);
+    }
+  }, []);
+
+  const loadCategory = useCallback(async (cat: { id: string; name: string }, forceReload = false) => {
     if (!activePlaylistId) return;
-    setDisplayCount(20);
+    // Skip reload if we already have data for this category and it's not forced
+    if (!forceReload && lastLoadedCategoryId.current === cat.id && localMoviesRef.current.length > 0) {
+      return;
+    }
+    const reqId = ++activeRequestId.current;
+    setDisplayCount(50);
     setLoading(true);
+    lastLoadedCategoryId.current = cat.id;
 
     try {
       let result: Channel[] = [];
@@ -176,6 +358,8 @@ export default function MoviesScreen() {
         result = await getChannelsForCategory(activePlaylistId, 'vod', cat.id, cat.name);
       }
 
+      if (activeRequestId.current !== reqId) return;
+
       const mapped = result.map((c: Channel) => ({
         id: c.id,
         title: c.name,
@@ -186,49 +370,189 @@ export default function MoviesScreen() {
         duration: '',
         quality: c.quality,
         genres: [c.category],
+        category: c.category,
+        categoryId: c.categoryId,
         description: '',
         streamUrl: c.streamUrl,
       }));
       setLocalMovies(mapped);
+
+      const target = pendingTargetRef.current;
+      let matchedMovie: Movie | null = null;
+      let mIdx = -1;
+      if (target) {
+        mIdx = mapped.findIndex(m => isTargetMatch(m, target));
+        if (mIdx >= 0) {
+          matchedMovie = mapped[mIdx];
+        }
+      }
+      if (matchedMovie && mIdx >= 0) {
+        setSelectedMovieId(matchedMovie.id);
+        setDisplayCount(Math.max(50, mIdx + 30));
+        scrollAndFocusTarget(matchedMovie.id, mIdx, rawNumColumns);
+        pendingTargetRef.current = null;
+        router.setParams({ focusId: '', focusName: '' });
+      }
     } catch (e) {
+      if (activeRequestId.current !== reqId) return;
       setLocalMovies([]);
     } finally {
-      setLoading(false);
+      if (activeRequestId.current === reqId) {
+        setLoading(false);
+      }
     }
-  }, [activePlaylistId, getChannelsForCategory]);
+  }, [activePlaylistId, getChannelsForCategory, rawNumColumns, scrollAndFocusTarget, displayCount]);
+
+  const handleCategoryPress = useCallback((cat: { id: string; name: string }) => {
+    if (isParentalLocked(cat.id)) {
+      setPendingCategory(cat);
+      setPinModalVisible(true);
+    } else {
+      if (selectedCategory && String(selectedCategory.id) === String(cat.id)) {
+        loadCategory(cat);
+      } else {
+        setSelectedCategory(cat);
+      }
+    }
+  }, [isParentalLocked, selectedCategory, loadCategory]);
 
   useEffect(() => {
     if (selectedCategory) {
       loadCategory(selectedCategory);
     }
-  }, [selectedCategory, loadCategory]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCategory?.id, activePlaylistId, refreshCounter]);
 
-  const { categoryId, focusId } = useLocalSearchParams<{ categoryId?: string; focusId?: string }>();
+  const { categoryId, categoryName, focusId, focusName } = useLocalSearchParams<{ 
+    categoryId?: string; 
+    categoryName?: string; 
+    focusId?: string; 
+    focusName?: string; 
+  }>();
 
   useEffect(() => {
-    if (focusId && localMovies.length > 0) {
-      const idx = localMovies.findIndex(m => m.id === focusId);
-      if (idx >= 0) {
-        if (idx >= displayCount) {
-          setDisplayCount(idx + 20);
+    if (focusId || focusName) {
+      pendingTargetRef.current = { id: focusId, name: focusName };
+      if (focusId) setSelectedMovieId(focusId);
+    }
+    if ((categoryId || categoryName) && categories.length > 0) {
+      const targetCat = categories.find(
+        c => (categoryId && String(c.id).toLowerCase() === String(categoryId).toLowerCase()) || 
+             (categoryId && c.name.toLowerCase() === String(categoryId).toLowerCase()) ||
+             (categoryName && c.name.toLowerCase() === String(categoryName).toLowerCase())
+      );
+      if (targetCat) {
+        if (movieSearch) setMovieSearch('');
+        const isSameCategory = selectedCategory && String(selectedCategory.id) === String(targetCat.id);
+        if (!isSameCategory) {
+          setLocalMovies([]);
+          setSelectedCategory(targetCat);
+        } else {
+          loadCategory(targetCat);
         }
-        setTimeout(() => {
-          flatListRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.5 });
-        }, 500);
+        const catIdx = categories.findIndex(c => String(c.id) === String(targetCat.id));
+        if (catIdx >= 0) {
+          setTimeout(() => {
+            try {
+              categoryListRef.current?.scrollToIndex({ index: catIdx, animated: true, viewPosition: 0.5 });
+            } catch (e) {
+              categoryListRef.current?.scrollToOffset({ offset: Math.max(0, (catIdx - 2) * 48), animated: true });
+            }
+          }, 250);
+        }
+        router.setParams({ categoryId: '', categoryName: '' });
       }
     }
-  }, [localMovies, focusId]);
+  }, [categoryId, categoryName, categories, focusId, focusName, movieSearch]);
+
+  useEffect(() => {
+    const target = pendingTargetRef.current || (focusId || focusName ? { id: focusId, name: focusName } : null);
+    if (target && localMovies.length > 0) {
+      const idx = localMovies.findIndex(m => isTargetMatch(m, target));
+      if (idx >= 0) {
+        const found = localMovies[idx];
+        setSelectedMovieId(found.id);
+        if (idx >= displayCount) {
+          setDisplayCount(idx + 30);
+        }
+        const cols = isLargeScreen ? numColumns : mobileNumColumns;
+        scrollAndFocusTarget(found.id, idx, cols);
+        pendingTargetRef.current = null;
+        if (focusId || focusName) {
+          router.setParams({ focusId: '', focusName: '' });
+        }
+      }
+    }
+  }, [localMovies, focusId, focusName, displayCount, numColumns, mobileNumColumns, isLargeScreen, scrollAndFocusTarget]);
+
+  const handleMoviePress = (item: any) => {
+    pendingTargetRef.current = { id: item.id, name: item.title };
+    setSelectedMovieId(item.id);
+
+    const catIdentifier = item.categoryId || item.category || (item.genres && item.genres[0]);
+    if (catIdentifier && categories.length > 0) {
+      const targetCat = categories.find(
+        c => String(c.id).toLowerCase() === String(catIdentifier).toLowerCase() || 
+             c.name.toLowerCase() === String(catIdentifier).toLowerCase()
+      );
+      if (targetCat) {
+        if (!selectedCategory || selectedCategory.id !== targetCat.id) {
+          if (movieSearch) setMovieSearch('');
+          setSelectedCategory(targetCat);
+        }
+        const catIdx = categories.findIndex(c => String(c.id) === String(targetCat.id));
+        if (catIdx >= 0) {
+          setTimeout(() => {
+            try {
+              categoryListRef.current?.scrollToIndex({ index: catIdx, animated: true, viewPosition: 0.5 });
+            } catch (e) {
+              categoryListRef.current?.scrollToOffset({ offset: Math.max(0, (catIdx - 2) * 48), animated: true });
+            }
+          }, 150);
+        }
+      }
+    }
+
+    router.push({
+      pathname: '/movie-detail',
+      params: {
+        id: item.id,
+        title: item.title,
+        poster: item.poster,
+        backdrop: item.backdrop,
+        quality: item.quality,
+        genres: Array.isArray(item.genres) ? item.genres.join(',') : (item.category || ''),
+        description: item.description,
+        streamUrl: item.streamUrl || '',
+      },
+    });
+  };
 
   useEffect(() => {
     const unsubscribe = navigation.addListener('focus', () => {
-      if (categoryId && categories.length > 0) {
-        const targetCat = categories.find(c => c.id === categoryId);
+      if ((categoryId || categoryName) && categories.length > 0) {
+        const targetCat = categories.find(
+          c => (categoryId && String(c.id).toLowerCase() === String(categoryId).toLowerCase()) || 
+               (categoryId && c.name.toLowerCase() === String(categoryId).toLowerCase()) ||
+               (categoryName && c.name.toLowerCase() === String(categoryName).toLowerCase())
+        );
         if (targetCat) {
+          if (movieSearch) setMovieSearch('');
           if (!selectedCategory || selectedCategory.id !== targetCat.id) {
             setSelectedCategory(targetCat);
           }
+          const catIdx = categories.findIndex(c => String(c.id) === String(targetCat.id));
+          if (catIdx >= 0) {
+            setTimeout(() => {
+              try {
+                categoryListRef.current?.scrollToIndex({ index: catIdx, animated: true, viewPosition: 0.5 });
+              } catch (e) {
+                categoryListRef.current?.scrollToOffset({ offset: Math.max(0, (catIdx - 2) * 48), animated: true });
+              }
+            }, 300);
+          }
           hasDefaulted.current = true;
-          router.setParams({ categoryId: '' });
+          router.setParams({ categoryId: '', categoryName: '' });
           return;
         }
       }
@@ -247,16 +571,19 @@ export default function MoviesScreen() {
       }
     });
     return unsubscribe;
-  }, [navigation, categories, categoryId, selectedCategory]);
+  }, [navigation, categories, categoryId, categoryName, selectedCategory, movieSearch]);
 
   useEffect(() => {
     if (categories.length > 0 && !hasDefaulted.current) {
+      if (categoryId || categoryName || focusId || focusName) {
+        return;
+      }
       if (isLargeScreen) {
         setSelectedCategory(categories[0]);
       }
       hasDefaulted.current = true;
     }
-  }, [categories, isLargeScreen]);
+  }, [categories, isLargeScreen, categoryId, categoryName, focusId, focusName]);
 
   useEffect(() => {
     hasDefaulted.current = false;
@@ -268,65 +595,56 @@ export default function MoviesScreen() {
 
   if (isLargeScreen) {
     const isWeb = Platform.OS === 'web';
-    const glassPaneStyle: any = isWeb ? {
-      backgroundColor: 'rgba(0, 0, 0, 0.65)',
-      backdropFilter: 'blur(30px)',
-      WebkitBackdropFilter: 'blur(30px)',
-      borderRadius: 16,
-      borderWidth: 1,
-      borderColor: 'rgba(255,255,255,0.08)',
-      marginTop: 12,
-      marginBottom: 32,
-      marginRight: 16,
-      overflow: 'hidden',
-    } : {
-      backgroundColor: 'rgba(0, 0, 0, 0.8)',
-      borderRadius: 16,
-      borderWidth: 1,
-      borderColor: 'rgba(255,255,255,0.08)',
-      marginTop: 12,
-      marginBottom: 32,
-      marginRight: 16,
-      overflow: 'hidden',
-    };
 
     return (
-      <View style={[styles.tvContainer, { backgroundColor: isLargeScreen ? 'transparent' : colors.background, paddingLeft: 24, opacity: isFocused ? 1 : 0, pointerEvents: isFocused ? 'auto' : 'none' }]}>
-        <View style={[{ flexDirection: 'row', flex: 1 }, glassPaneStyle]}>
+      <View style={[styles.tvContainer, { backgroundColor: '#05070a', paddingLeft: 0, opacity: isFocused ? 1 : 0, pointerEvents: isFocused ? 'auto' : 'none' }]}>
+        <View style={{ flexDirection: 'row', flex: 1, backgroundColor: '#0A0C10', height: '100%' }}>
           {/* Pane 1: Categories */}
-          <View style={[styles.tvPaneCategories, { borderRightWidth: 1, borderRightColor: 'rgba(255,255,255,0.08)' }]}>
+          <View style={[styles.tvPaneCategories, { borderRightWidth: 1, borderRightColor: 'rgba(255,255,255,0.08)' }]} data-focus-zone="movies-categories">
             <View style={styles.tvHeader}>
-              <Text style={[styles.tvTitle, { color: colors.text }]}>{t('movies')}</Text>
-              <View style={[styles.searchBox, { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.1)' }]}>
-                <Ionicons name="search" size={14} color={colors.mutedForeground} />
-                {isLargeScreen ? (
-                  <TVFocusable onPress={() => setShowCategoryKeyboard(true)} style={{ flex: 1, paddingVertical: 4 }}>
-                    <Text style={[styles.searchInput, { color: categorySearch ? colors.text : colors.mutedForeground, marginTop: 4 }]}>
-                      {categorySearch || t('search_categories')}
-                    </Text>
-                  </TVFocusable>
-                ) : (
-                  <TextInput
-                    style={[styles.searchInput, { color: colors.text }]}
-                    placeholder={t('search_categories')}
-                    placeholderTextColor={colors.mutedForeground}
-                    value={categorySearch}
-                    onChangeText={setCategorySearch}
-                  />
-                )}
-                {categorySearch ? (
-                  <TVFocusable onPress={() => setCategorySearch('')} disableBorder={true}>
-                    <Ionicons name="close-circle" size={16} color={colors.mutedForeground} style={{ padding: 4 }} />
-                  </TVFocusable>
-                ) : null}
-              </View>
+              {/* <Text style={[styles.tvTitle, { color: colors.text }]}>{t('movies')}</Text> */}
+              {!isWindowsWeb && (
+                <View style={[styles.searchBox, { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.1)' }]}>
+                  <Ionicons name="search" size={14} color={colors.mutedForeground} />
+                  {isLargeScreen ? (
+                    <TVFocusable onPress={() => setShowCategoryKeyboard(true)} style={{ flex: 1, paddingVertical: 4 }}>
+                      <Text style={[styles.searchInput, { color: categorySearch ? colors.text : colors.mutedForeground, marginTop: 4 }]}>
+                        {categorySearch || 'search'}
+                      </Text>
+                    </TVFocusable>
+                  ) : (
+                    <TextInput
+                      style={[styles.searchInput, { color: colors.text }]}
+                      placeholder="search"
+                      placeholderTextColor={colors.mutedForeground}
+                      value={categorySearch}
+                      onChangeText={setCategorySearch}
+                    />
+                  )}
+                  {categorySearch ? (
+                    <TVFocusable onPress={() => setCategorySearch('')} disableBorder={true}>
+                      <Ionicons name="close-circle" size={16} color={colors.mutedForeground} style={{ padding: 4 }} />
+                    </TVFocusable>
+                  ) : null}
+                </View>
+              )}
             </View>
             <FlatList
               ref={categoryListRef}
               style={{ flex: 1 }}
               data={filteredCategories}
+              extraData={[selectedCategory?.id, favoriteItems.length, filteredCategories]}
               keyExtractor={(item) => item.id}
               showsVerticalScrollIndicator={false}
+              onScrollToIndexFailed={(info) => {
+                const offset = (info.averageItemLength || 48) * info.index;
+                categoryListRef.current?.scrollToOffset({ offset, animated: false });
+                setTimeout(() => {
+                  try {
+                    categoryListRef.current?.scrollToIndex({ index: info.index, animated: true, viewPosition: 0.5 });
+                  } catch (e) {}
+                }, 300);
+              }}
               renderItem={({ item, index }) => {
                 const isSelected = selectedCategory?.id === item.id;
                 const isSpecial = item.id.startsWith('__');
@@ -334,12 +652,12 @@ export default function MoviesScreen() {
                   <View 
                     style={[
                       styles.tvCategoryItem,
-                      { padding: 0, paddingHorizontal: 0, paddingVertical: 0, flexDirection: 'row', alignItems: 'stretch' },
-                      isSelected && { backgroundColor: 'rgba(212,168,67,0.15)', borderLeftWidth: 3, borderLeftColor: colors.gold }
+                      { padding: 0, paddingHorizontal: 0, paddingVertical: 0, flexDirection: 'row', alignItems: 'stretch' }
                     ]}
                   >
                     <TVFocusable
                       hasTVPreferredFocus={isSelected}
+                      disableBorder
                       onFocus={() => {
                         categoryListRef.current?.scrollToIndex({
                           index,
@@ -348,34 +666,52 @@ export default function MoviesScreen() {
                         });
                       }}
                       onPress={() => {
-                        if (isParentalLocked(item.id)) {
-                          setPendingCategory(item);
-                          setPinModalVisible(true);
-                        } else {
-                          setSelectedCategory(item);
-                        }
+                        handleCategoryPress(item);
                       }}
                       style={({ focused }: any) => [
-                        { flex: 1, padding: 12, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', gap: 8, borderRadius: 8 },
-                        focused && { backgroundColor: colors.gold, transform: [{ scale: 1.02 }] }
+                        { flex: 1, padding: 12, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', gap: 8, borderRadius: 8, borderWidth: 1, borderColor: 'transparent' },
+                        isSelected && { borderColor: 'rgba(212,168,67,0.8)' },
+                        focused && { backgroundColor: 'rgba(212,168,67,0.15)', transform: [{ scale: 1.02 }] }
                       ]}
                     >
                       {({ focused }: any) => (
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 }}>
-                          {item.id === '__favorites__' && (
-                            <Lineicons icon={HeartBulk} size={16} color={focused ? '#000' : (isSelected ? colors.gold : colors.text)} />
+                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flex: 1, width: '100%' }}>
+                          {focused && (
+                            <View style={{ position: 'absolute', left: -16, top: -12, bottom: -12, width: 3, backgroundColor: colors.gold, borderTopRightRadius: 3, borderBottomRightRadius: 3 }} />
                           )}
-                          {item.id === '__recent__' && (
-                            <Ionicons name="time" size={16} color={focused ? '#000' : (isSelected ? colors.gold : colors.text)} />
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1, marginRight: 8, overflow: 'hidden' }}>
+                            {item.id === '__favorites__' && (
+                              <Lineicons icon={HeartBulk} size={16} color={focused || isSelected ? colors.gold : colors.text} />
+                            )}
+                            {item.id === '__recent__' && (
+                              <Ionicons name="time" size={16} color={focused || isSelected ? colors.gold : colors.text} />
+                            )}
+                            <MarqueeText 
+                              text={item.name}
+                              isFocused={focused || isSelected}
+                              style={[
+                                styles.tvCategoryText, 
+                                { color: focused || isSelected ? colors.gold : colors.text, fontWeight: isSelected || isSpecial ? 'bold' : '500' }
+                              ]} 
+                            />
+                          </View>
+                          {item.count !== undefined && (
+                            <View style={{
+                              paddingHorizontal: 8,
+                              paddingVertical: 2,
+                              borderRadius: 10,
+                              backgroundColor: focused ? 'rgba(212,168,67,0.25)' : (isSelected ? 'rgba(212,168,67,0.1)' : 'rgba(255,255,255,0.08)'),
+                              marginLeft: 6,
+                            }}>
+                              <Text style={{
+                                fontSize: 11,
+                                fontWeight: '700',
+                                color: focused || isSelected ? colors.gold : colors.mutedForeground,
+                              }}>
+                                {item.count.toLocaleString('en-US')}
+                              </Text>
+                            </View>
                           )}
-                          <MarqueeText 
-                            text={`${item.name}${item.count !== undefined ? ` (${item.count})` : ''}`}
-                            isFocused={focused || isSelected}
-                            style={[
-                              styles.tvCategoryText, 
-                              { color: focused ? '#000' : (isSelected ? colors.gold : colors.text), fontWeight: isSelected || isSpecial ? 'bold' : '500' }
-                            ]} 
-                          />
                         </View>
                       )}
                     </TVFocusable>
@@ -386,11 +722,27 @@ export default function MoviesScreen() {
           </View>
 
           {/* Pane 2: Movies */}
-          <View nativeID="tour-movies-grid" {...({ id: 'tour-movies-grid' } as any)} style={[styles.tvPaneContent, { flex: 1 }]}>
+          <View nativeID="tour-movies-grid" {...({ id: 'tour-movies-grid' } as any)} style={[styles.tvPaneContent, { flex: 1 }]} data-focus-zone="movies-grid">
             <View style={[styles.tvHeader, { paddingBottom: 16 }]}>
-              <Text style={[styles.tvTitle, { color: colors.text }]}>
-                {selectedCategory ? selectedCategory.name : 'Select a Category'}
-              </Text>
+              {/* <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                <Text style={[styles.tvTitle, { color: colors.text }]}>
+                  {selectedCategory ? selectedCategory.name : 'Select a Category'}
+                </Text>
+                {selectedCategory?.count !== undefined && (
+                  <View style={{
+                    paddingHorizontal: 10,
+                    paddingVertical: 2,
+                    borderRadius: 12,
+                    backgroundColor: 'rgba(212,168,67,0.15)',
+                    borderWidth: 1,
+                    borderColor: 'rgba(212,168,67,0.3)',
+                  }}>
+                    <Text style={{ color: colors.gold, fontWeight: 'bold', fontSize: 14 }}>
+                      {selectedCategory.count.toLocaleString('en-US')}
+                    </Text>
+                  </View>
+                )}
+              </View> */}
               {selectedCategory && (
                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                   {selectedCategory && !selectedCategory.id.startsWith('__') && !movieSearch && (
@@ -422,16 +774,25 @@ export default function MoviesScreen() {
                   )}
                   <View style={[styles.searchBox, { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(255,255,255,0.1)' }]}>
                     <Ionicons name="search" size={14} color={colors.mutedForeground} />
-                    {isLargeScreen ? (
+                    {isWindowsWeb ? (
+                      <TextInput
+                        style={[styles.searchInput, { color: colors.text, outlineStyle: 'none' } as any]}
+                        placeholder="search"
+                        placeholderTextColor={colors.mutedForeground}
+                        value={movieSearch}
+                        onChangeText={setMovieSearch}
+                        returnKeyType="search"
+                      />
+                    ) : isLargeScreen ? (
                       <TVFocusable onPress={() => setShowMovieKeyboard(true)} style={{ flex: 1, paddingVertical: 4 }}>
                         <Text style={[styles.searchInput, { color: movieSearch ? colors.text : colors.mutedForeground, marginTop: 4 }]}>
-                          {movieSearch || "Search movies..."}
+                          {movieSearch || 'search'}
                         </Text>
                       </TVFocusable>
                     ) : (
                       <TextInput
                         style={[styles.searchInput, { color: colors.text }]}
-                        placeholder={t('search_movies')}
+                        placeholder="search"
                         placeholderTextColor={colors.mutedForeground}
                         value={movieSearch}
                         onChangeText={setMovieSearch}
@@ -446,7 +807,7 @@ export default function MoviesScreen() {
                 </View>
               )}
             </View>
-            {loading ? (
+            {loading || isSearchingGlobal ? (
               <View style={styles.centerAll}>
                 <ActivityIndicator size="large" color={colors.gold} />
               </View>
@@ -457,76 +818,155 @@ export default function MoviesScreen() {
               </View>
             ) : filteredMovies.length === 0 ? (
               <View style={styles.centerAll}>
-                <Lineicons icon={Search1Bulk} size={48} color={colors.mutedForeground} />
-                <Text style={[styles.emptyTitle, { color: colors.text, marginTop: 12 }]}>{t('no_movies')}</Text>
+                <Lineicons 
+                  icon={selectedCategory?.id === '__favorites__' ? HeartBulk : Search1Bulk} 
+                  size={48} 
+                  color={colors.mutedForeground} 
+                />
+                <Text style={[styles.emptyTitle, { color: colors.text, marginTop: 12, marginBottom: 16 }]}>
+                  {movieSearch 
+                    ? t('no_movies') 
+                    : selectedCategory?.id === '__favorites__'
+                    ? t('no_favorites')
+                    : (isNetworkOnline === false ? 'لا يوجد اتصال بالإنترنت' : t('no_movies'))}
+                </Text>
+                {selectedCategory && !selectedCategory.id.startsWith('__') && (
+                  <TVFocusable
+                    onPress={() => loadCategory(selectedCategory)}
+                    style={({ focused }: any) => [
+                      {
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        backgroundColor: colors.gold,
+                        paddingHorizontal: 20,
+                        paddingVertical: 10,
+                        borderRadius: 8,
+                        gap: 8,
+                      },
+                      focused && { transform: [{ scale: 1.05 }], backgroundColor: '#f0c767' }
+                    ]}
+                  >
+                    <Ionicons name="refresh" size={18} color="#000" />
+                    <Text style={{ color: '#000', fontWeight: 'bold', fontSize: 14 }}>
+                      إعادة المحاولة
+                    </Text>
+                  </TVFocusable>
+                )}
               </View>
             ) : (
               <View style={{ flex: 1, opacity: loading ? 0.5 : 1 }}>
-                <FlatList
-                  ref={flatListRef}
-                  onScrollToIndexFailed={(info) => {
-                    const offset = info.averageItemLength * Math.floor(info.index / numColumns);
-                    flatListRef.current?.scrollToOffset({ offset, animated: false });
-                    setTimeout(() => {
-                      try {
-                        flatListRef.current?.scrollToIndex({ index: info.index, animated: true, viewPosition: 0.5 });
-                      } catch (e) {}
-                    }, 300);
-                  }}
-                  removeClippedSubviews={true}
-                  initialNumToRender={8}
-                  maxToRenderPerBatch={12}
-                  windowSize={5}
-                  key={`movies_grid_${numColumns}`}
-                  data={filteredMovies.slice(0, displayCount)}
-                  onEndReached={() => setDisplayCount(prev => prev + 20)}
-                  onEndReachedThreshold={0.5}
-                keyExtractor={(item) => item.id}
-                numColumns={numColumns}
-                renderItem={({ item }) => (
-                  <View style={[styles.tvGridItem, { width: `${100 / numColumns}%`, maxWidth: `${100 / numColumns}%` }]}>
-                    <MovieCard
-                      movie={item}
-                      width={'100%' as any}
-                      onPress={() => {
-                        router.push({
-                          pathname: '/movie-detail',
-                          params: {
-                            id: item.id,
-                            title: item.title,
-                            poster: item.poster,
-                            backdrop: item.backdrop,
-                            quality: item.quality,
-                            genres: item.genres.join(','),
-                            description: item.description,
-                            streamUrl: item.streamUrl || '',
-                          },
-                        });
-                      }}
-                    />
-                  </View>
+                {isWindowsWeb ? (
+                  <ScrollView 
+                    contentContainerStyle={{ flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 12, paddingBottom: 40 }}
+                  >
+                    {filteredMovies.slice(0, displayCount).map((item, index) => {
+                      const isItemFocused = Boolean(
+                        selectedMovieId && (
+                          String(item.id) === String(selectedMovieId) ||
+                          isTargetMatch(item, { id: selectedMovieId })
+                        )
+                      );
+                      return (
+                        <View key={`web_${item.id}_${index}`} style={[styles.tvGridItem, { width: `${100 / numColumns}%`, maxWidth: `${100 / numColumns}%` }]}>
+                          <MovieCard
+                            autoFocus={isItemFocused}
+                            isSelected={isItemFocused}
+                            movie={item}
+                            width={'100%' as any}
+                            onPress={() => handleMoviePress(item)}
+                          />
+                        </View>
+                      );
+                    })}
+                    {displayCount < filteredMovies.length && (
+                      <View style={{ width: '100%', height: 100, justifyContent: 'center', alignItems: 'center' }}>
+                         <ActivityIndicator size="large" color={colors.gold} />
+                         {isWindowsWeb && (
+                           <View 
+                             ref={(el) => {
+                               if (el && typeof window !== 'undefined' && (window as any).IntersectionObserver) {
+                                 const obs = new IntersectionObserver(([entry]) => {
+                                   if (entry.isIntersecting) {
+                                     setDisplayCount(p => p + 40);
+                                     obs.disconnect();
+                                   }
+                                 }, { rootMargin: '800px' });
+                                 obs.observe(el as any);
+                               }
+                             }}
+                             style={{ width: 10, height: 10, position: 'absolute', bottom: 0 }} 
+                           />
+                         )}
+                      </View>
+                    )}
+                  </ScrollView>
+                ) : (
+                  <FlatList
+                    ref={flatListRef}
+                    onScrollToIndexFailed={(info) => {
+                      const row = Math.floor(info.index / numColumns);
+                      const rowHeight = 380;
+                      flatListRef.current?.scrollToOffset({ offset: Math.max(0, row * rowHeight), animated: false });
+                      setTimeout(() => {
+                        try {
+                          flatListRef.current?.scrollToIndex({ index: info.index, animated: true, viewPosition: 0.5 });
+                        } catch (e) {}
+                      }, 250);
+                    }}
+                    removeClippedSubviews={false}
+                    initialNumToRender={12}
+                    maxToRenderPerBatch={16}
+                    windowSize={7}
+                    key={`movies_grid_${numColumns}`}
+                    data={filteredMovies.slice(0, displayCount)}
+                    onEndReached={() => setDisplayCount(prev => prev + 20)}
+                    onEndReachedThreshold={0.5}
+                    keyExtractor={(item) => item.id}
+                    numColumns={numColumns}
+                    renderItem={({ item }) => {
+                      const isItemFocused = Boolean(
+                        selectedMovieId && (
+                          String(item.id) === String(selectedMovieId) ||
+                          isTargetMatch(item, { id: selectedMovieId })
+                        )
+                      );
+                      return (
+                        <View style={[styles.tvGridItem, { width: `${100 / numColumns}%`, maxWidth: `${100 / numColumns}%` }]}>
+                          <MovieCard
+                            autoFocus={isItemFocused}
+                            isSelected={isItemFocused}
+                            movie={item}
+                            width={'100%' as any}
+                            onPress={() => handleMoviePress(item)}
+                          />
+                        </View>
+                      );
+                    }}
+                    contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 40 }}
+                  />
                 )}
-                contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 40 }}
-              />
               </View>
             )}
           </View>
         </View>
-
-        <SearchKeyboardModal 
-          visible={showCategoryKeyboard}
-          value={categorySearch}
-          onChangeText={setCategorySearch}
-          onClose={() => setShowCategoryKeyboard(false)}
-          placeholder={t('search_categories')}
-        />
-        <SearchKeyboardModal 
-          visible={showMovieKeyboard}
-          value={movieSearch}
-          onChangeText={setMovieSearch}
-          onClose={() => setShowMovieKeyboard(false)}
-          placeholder={t('search_movies')}
-        />
+        {!isWindowsWeb && (
+          <>
+            <SearchKeyboardModal 
+              visible={showCategoryKeyboard}
+              value={categorySearch}
+              onChangeText={setCategorySearch}
+              onClose={() => setShowCategoryKeyboard(false)}
+              placeholder="search"
+            />
+            <SearchKeyboardModal 
+              visible={showMovieKeyboard}
+              value={movieSearch}
+              onChangeText={setMovieSearch}
+              onClose={() => setShowMovieKeyboard(false)}
+              placeholder="search"
+            />
+          </>
+        )}
       </View>
     );
   }
@@ -552,10 +992,38 @@ export default function MoviesScreen() {
             <Text style={[styles.title, { color: colors.text, fontSize: isLandscape ? 18 : 22 }]} numberOfLines={isLandscape ? 1 : 2}>
               {selectedCategory.name}
             </Text>
-            <Text style={[styles.count, { color: colors.mutedForeground, fontSize: isLandscape ? 11 : 13 }]}>
-              {localMovies.length.toLocaleString()} {t('count_channels')}
-            </Text>
+            {selectedCategory.id !== '__all__' && (
+              <Text style={[styles.count, { color: colors.mutedForeground, fontSize: isLandscape ? 11 : 13 }]}>
+                {localMovies.length.toLocaleString('en-US')} {t('count_movies')}
+              </Text>
+            )}
           </View>
+          {selectedCategory && !selectedCategory.id.startsWith('__') && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginRight: 8 }}>
+              <TVFocusable
+                onPress={() => moveCategory('up')}
+                style={({ focused }: any) => [
+                  styles.tvFavoriteBtn,
+                  { backgroundColor: focused ? colors.gold : 'rgba(255,255,255,0.05)', borderColor: colors.border, marginTop: 0, paddingHorizontal: 10, paddingVertical: 6 }
+                ]}
+              >
+                {({ focused }: any) => (
+                  <Ionicons name="chevron-up" size={18} color={focused ? '#000' : colors.text} />
+                )}
+              </TVFocusable>
+              <TVFocusable
+                onPress={() => moveCategory('down')}
+                style={({ focused }: any) => [
+                  styles.tvFavoriteBtn,
+                  { backgroundColor: focused ? colors.gold : 'rgba(255,255,255,0.05)', borderColor: colors.border, marginTop: 0, paddingHorizontal: 10, paddingVertical: 6 }
+                ]}
+              >
+                {({ focused }: any) => (
+                  <Ionicons name="chevron-down" size={18} color={focused ? '#000' : colors.text} />
+                )}
+              </TVFocusable>
+            </View>
+          )}
         </View>
 
 
@@ -567,7 +1035,7 @@ export default function MoviesScreen() {
           >
             <Lineicons icon={Search1Bulk} size={16} color={colors.mutedForeground} />
             <Text style={[styles.searchInput, { color: colors.mutedForeground }]}>
-              {t('search_movies')}
+              search
             </Text>
           </TVFocusable>
         )}
@@ -578,55 +1046,81 @@ export default function MoviesScreen() {
           </View>
         ) : localMovies.length === 0 ? (
           <View style={styles.centerAll}>
-            <Lineicons icon={MonitorBulk} size={48} color={colors.mutedForeground} />
-            <Text style={[styles.emptyTitle, { color: colors.text, marginTop: 12 }]}>{t('no_movies')}</Text>
+            <Lineicons 
+              icon={selectedCategory?.id === '__favorites__' ? HeartBulk : MonitorBulk} 
+              size={48} 
+              color={colors.mutedForeground} 
+            />
+            <Text style={[styles.emptyTitle, { color: colors.text, marginTop: 12, marginBottom: 16 }]}>
+              {selectedCategory?.id === '__favorites__'
+                ? t('no_favorites')
+                : (isNetworkOnline === false ? 'لا يوجد اتصال بالإنترنت' : t('no_movies'))}
+            </Text>
+            {selectedCategory && !selectedCategory.id.startsWith('__') && (
+              <TVFocusable
+                onPress={() => loadCategory(selectedCategory)}
+                style={({ focused }: any) => [
+                  {
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    backgroundColor: colors.gold,
+                    paddingHorizontal: 20,
+                    paddingVertical: 10,
+                    borderRadius: 8,
+                    gap: 8,
+                  },
+                  focused && { transform: [{ scale: 1.05 }], backgroundColor: '#f0c767' }
+                ]}
+              >
+                <Ionicons name="refresh" size={18} color="#000" />
+                <Text style={{ color: '#000', fontWeight: 'bold', fontSize: 14 }}>
+                  إعادة المحاولة
+                </Text>
+              </TVFocusable>
+            )}
           </View>
         ) : (
           <FlatList
             ref={flatListRef}
             onScrollToIndexFailed={(info) => {
-              const offset = info.averageItemLength * Math.floor(info.index / mobileNumColumns);
-              flatListRef.current?.scrollToOffset({ offset, animated: false });
+              const row = Math.floor(info.index / mobileNumColumns);
+              const rowHeight = 220;
+              flatListRef.current?.scrollToOffset({ offset: Math.max(0, row * rowHeight), animated: false });
               setTimeout(() => {
                 try {
                   flatListRef.current?.scrollToIndex({ index: info.index, animated: true, viewPosition: 0.5 });
                 } catch (e) {}
-              }, 300);
+              }, 250);
             }}
-            removeClippedSubviews={true}
-            initialNumToRender={8}
-            maxToRenderPerBatch={12}
-            windowSize={5}
+            removeClippedSubviews={Platform.OS !== 'web'}
+            initialNumToRender={12}
+            maxToRenderPerBatch={16}
+            windowSize={7}
             key={`movies_grid_${mobileNumColumns}`}
             data={localMovies.slice(0, displayCount)}
             onEndReached={() => setDisplayCount(prev => prev + 50)}
             onEndReachedThreshold={0.5}
             keyExtractor={(item) => item.id}
             numColumns={mobileNumColumns}
-            renderItem={({ item }) => (
-              <View style={[styles.gridItem, { width: `${100 / mobileNumColumns}%`, maxWidth: `${100 / mobileNumColumns}%` }]}>
-                <MovieCard
-                  autoFocus={focusId === item.id}
-                  movie={item}
-                  width={'100%' as any}
-                  onPress={() => {
-                    router.push({
-                      pathname: '/movie-detail',
-                      params: {
-                        id: item.id,
-                        title: item.title,
-                        poster: item.poster,
-                        backdrop: item.backdrop,
-                        quality: item.quality,
-                        genres: item.genres.join(','),
-                        description: item.description,
-                        streamUrl: item.streamUrl || '',
-                      },
-                    });
-                  }}
-                />
-              </View>
-            )}
+            renderItem={({ item }) => {
+              const isItemFocused = Boolean(
+                    selectedMovieId && (
+                      String(item.id) === String(selectedMovieId) ||
+                      isTargetMatch(item, { id: selectedMovieId })
+                    )
+                  );
+              return (
+                <View style={[styles.gridItem, { width: `${100 / mobileNumColumns}%`, maxWidth: `${100 / mobileNumColumns}%` }]}>
+                  <MovieCard
+                    autoFocus={isItemFocused}
+                    isSelected={isItemFocused}
+                    movie={item}
+                    width={'100%' as any}
+                    onPress={() => handleMoviePress(item)}
+                  />
+                </View>
+              );
+            }}
             contentContainerStyle={[styles.gridContent, { paddingBottom: isLandscape ? insets.bottom + 80 : insets.bottom + 120 }]}
           />
         )}
@@ -650,7 +1144,7 @@ export default function MoviesScreen() {
       <View style={styles.header}>
         <Text style={[styles.title, { color: colors.text }]}>{t('movies')}</Text>
         <Text style={[styles.count, { color: colors.mutedForeground }]}>
-          {categories.length.toLocaleString()} {t('count_categories')}
+          {categories.length.toLocaleString('en-US')} {t('count_categories')}
         </Text>
       </View>
 
@@ -660,7 +1154,7 @@ export default function MoviesScreen() {
       >
         <Lineicons icon={Search1Bulk} size={16} color={colors.mutedForeground} />
         <Text style={[styles.searchInput, { color: colors.mutedForeground }]}>
-          {t('search_movies')}
+          search
         </Text>
       </TVFocusable>
 
@@ -671,7 +1165,7 @@ export default function MoviesScreen() {
         </View>
       ) : (
         <FlatList
-removeClippedSubviews={true}
+removeClippedSubviews={Platform.OS !== 'web'}
 initialNumToRender={8}
 maxToRenderPerBatch={12}
 windowSize={5}
@@ -682,23 +1176,37 @@ windowSize={5}
           renderItem={({ item }) => (
             <View style={{ width: `${100 / categoryNumColumns}%`, padding: 0 }}>
               <TVFocusable
-                onPress={() => setSelectedCategory(item)}
+                onPress={() => handleCategoryPress(item)}
                 style={({ focused }: any) => [
                   styles.categoryItem,
                   { backgroundColor: focused ? colors.surface : colors.surface2, borderColor: focused ? colors.gold : colors.border },
                   { padding: 14 }
                 ]}
               >
-                <View style={[styles.categoryLeft, { flex: 1, flexDirection: 'row' }]}>
-                  <View style={[styles.categoryIconBg, { backgroundColor: colors.gold + '15' }]}>
-                    <Lineicons icon={Folder1Bulk} size={18} color={colors.gold} />
+                <View style={[styles.categoryLeft, { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }]}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1, marginRight: 8 }}>
+                    <View style={[styles.categoryIconBg, { backgroundColor: colors.gold + '15' }]}>
+                      <Lineicons icon={Folder1Bulk} size={18} color={colors.gold} />
+                    </View>
+                    <Text 
+                      style={[styles.categoryName, { color: colors.text, textAlign: 'left', flex: 1 }]} 
+                      numberOfLines={2}
+                    >
+                      {item.name}
+                    </Text>
                   </View>
-                  <Text 
-                    style={[styles.categoryName, { color: colors.text, textAlign: 'left', flex: 1 }]} 
-                    numberOfLines={2}
-                  >
-                    {item.name}
-                  </Text>
+                  {item.count !== undefined && (
+                    <View style={{
+                      paddingHorizontal: 8,
+                      paddingVertical: 2,
+                      borderRadius: 10,
+                      backgroundColor: 'rgba(212,168,67,0.15)',
+                    }}>
+                      <Text style={{ fontSize: 12, fontWeight: '700', color: colors.gold }}>
+                        {item.count.toLocaleString('en-US')}
+                      </Text>
+                    </View>
+                  )}
                 </View>
               </TVFocusable>
             </View>

@@ -1,11 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
-import React from 'react';
+import React, { useState } from 'react';
 import {
   View,
   StyleSheet,
   Platform,
   useWindowDimensions,
   Text,
+  ActivityIndicator,
 } from 'react-native';
 import { useRouter, usePathname } from 'expo-router';
 import { useColors } from '@/hooks/useColors';
@@ -13,6 +14,7 @@ import { useTranslation } from '@/hooks/useTranslation';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { SymbolView } from 'expo-symbols';
 import { TVFocusable } from '@/components/TVFocusable';
+import { useAppStore } from '@/store/app-store';
 // Lineicons removed in favor of Ionicons
 
 const MAIN_TABS = [
@@ -68,12 +70,40 @@ export function TVSidebar() {
   const router = useRouter();
   const pathname = usePathname();
   const colors = useColors();
-  const { isRTL } = useTranslation();
+  const { isRTL, t } = useTranslation();
   const insets = useSafeAreaInsets();
   const isIOS = Platform.OS === 'ios';
   const { width } = useWindowDimensions();
   const isLargeScreen = width >= 1024 || Platform.isTV;
   const isWeb = Platform.OS === 'web';
+
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const checkAuthStatus = useAppStore(s => s.checkAuthStatus);
+  const refreshPlaylist = useAppStore(s => s.refreshPlaylist);
+  const activePlaylistId = useAppStore(s => s.activePlaylistId);
+  const showGlobalAlert = useAppStore(s => s.showGlobalAlert);
+  const hideGlobalAlert = useAppStore(s => s.hideGlobalAlert);
+
+  const handleSidebarRefresh = async () => {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    try {
+      await checkAuthStatus();
+      if (activePlaylistId) {
+        await refreshPlaylist(activePlaylistId);
+      }
+      showGlobalAlert(
+        t('success') || 'Success',
+        t('refresh_success') || 'Data refreshed successfully',
+        t('ok') || 'OK',
+        () => hideGlobalAlert()
+      );
+    } catch (error) {
+      console.error('Failed to refresh data from sidebar:', error);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   if (!isLargeScreen) return null;
 
@@ -101,9 +131,18 @@ export function TVSidebar() {
         borderLeftColor: colors.border,
       };
 
+  const mainTabs = [
+    { name: 'home', path: '/', icon: 'home-outline', label: t('home') || 'Home', iosIcon: 'house' },
+    { name: 'live', path: '/live', icon: 'tv-outline', label: t('live_tv') || 'Live TV', iosIcon: 'tv' },
+    { name: 'movies', path: '/movies', icon: 'film-outline', label: t('movies') || 'Movies', iosIcon: 'film' },
+    { name: 'series', path: '/series', icon: 'layers-outline', label: t('series') || 'Series', iosIcon: 'ticket' },
+    { name: 'catchup', path: '/catchup', icon: 'time-outline', label: t('catchup') || 'Replay', iosIcon: 'clock.arrow.circlepath' },
+  ];
+
   return (
     <View
       nativeID="tour-sidebar-nav"
+      data-focus-zone="sidebar"
       {...({ id: 'tour-sidebar-nav' } as any)}
       style={[
         styles.sidebar,
@@ -133,7 +172,7 @@ export function TVSidebar() {
 
         <View style={styles.divider} />
 
-        {MAIN_TABS.map((tab: any) => {
+        {mainTabs.map((tab: any) => {
           const isActive =
             tab.path === '/'
               ? pathname === '/'
@@ -156,6 +195,19 @@ export function TVSidebar() {
       <View style={{ flex: 1 }} />
 
       <View style={styles.navGroup}>
+        <SidebarItem
+          nativeID="tour-refresh-btn"
+          icon="refresh-outline"
+          iosIcon="arrow.clockwise"
+          isActive={false}
+          onPress={handleSidebarRefresh}
+          isIOS={isIOS}
+          customContent={
+            isRefreshing ? (
+              <ActivityIndicator size="small" color={GOLD} />
+            ) : null
+          }
+        />
         <SidebarItem
           icon="settings-outline"
           iosIcon="gear"

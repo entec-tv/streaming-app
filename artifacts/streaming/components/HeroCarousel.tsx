@@ -21,7 +21,7 @@ export function HeroCarousel({ items, onPlay, onInfo }: HeroCarouselProps) {
   const { t, isRTL } = useTranslation();
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
-  const carouselHeight = isLandscape ? height * 0.8 : height * 0.7;
+  const carouselHeight = isLandscape ? Math.min(Math.round(height * 0.48), 400) : Math.round(height * 0.55);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isUserInteracting, setIsUserInteracting] = useState(false);
   const [containerWidth, setContainerWidth] = useState(width);

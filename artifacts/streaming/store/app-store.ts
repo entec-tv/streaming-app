@@ -1,10 +1,12 @@
 import { create } from 'zustand';
-import { Platform } from 'react-native';
+import { Platform, Dimensions } from 'react-native';
 import AsyncStorageOriginal from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 
 import { readCacheString, writeCacheString, deleteCache } from '../lib/storage';
+import { createEventSource } from '../lib/event-source';
+import { networkManager } from '../lib/network';
 
 const isLargeDataKey = (key: string) => key.startsWith('channels_') || key.startsWith('categories_') || key.startsWith('search_index_');
 
@@ -33,13 +35,24 @@ import Constants from 'expo-constants';
 import { Channel, Playlist } from '../types';
 import { MOCK_PLAYLISTS, MOCK_CHANNELS, MOCK_MOVIES, MOCK_SERIES } from '../lib/mock-data';
 import { parseM3U } from '../lib/m3u-parser';
-import { base64Decode } from '../lib/base64';
+import { base64Decode, base64Encode, decodeIfNeeded } from '../lib/base64';
 import { getOrCreateDeviceData } from '../utils/device';
 
 export interface PlaylistCategories {
-  live: { id: string; name: string }[];
-  vod: { id: string; name: string }[];
-  series: { id: string; name: string }[];
+  live: { id: string; name: string; count?: number }[];
+  vod: { id: string; name: string; count?: number }[];
+  series: { id: string; name: string; count?: number }[];
+}
+
+export interface CategoryCountsData {
+  live: Record<string, number>;
+  vod: Record<string, number>;
+  series: Record<string, number>;
+  totals: {
+    live: number;
+    vod: number;
+    series: number;
+  };
 }
 
 export interface CategoryPreferences {
@@ -47,6 +60,12 @@ export interface CategoryPreferences {
   liveOrder: string[];
   vodOrder: string[];
   seriesOrder: string[];
+}
+
+export interface GlobalToastData {
+  title: string;
+  message: string;
+  type?: 'info' | 'success' | 'warning';
 }
 
 export interface WatchedItem {
@@ -84,6 +103,12 @@ interface AppState {
   login: (token: string, customer?: any) => void;
   logout: () => void;
   setupSseConnection: () => void;
+  globalToast: GlobalToastData | null;
+  showToast: (title: string, message: string, type?: 'info' | 'success' | 'warning') => void;
+  hideToast: () => void;
+  refreshCounter: number;
+  isNetworkOnline: boolean;
+  setIsNetworkOnline: (status: boolean) => void;
 
   parentalPin: string | null;
   setParentalPin: (pin: string | null) => void;
@@ -107,15 +132,27 @@ interface AppState {
   loadingChannels: boolean;
   subscriptionExpired: boolean;
   setSubscriptionExpired: (expired: boolean) => void;
+  isTrialActive: boolean;
+  trialDaysRemaining: number;
+  trialHoursRemaining: number;
+  trialEndsAt: string | null;
+  serverTime: string | null;
+  serverTimeOffset: number;
+  getServerTime: () => Date;
+  isAppLocked: boolean;
+  setAppLocked: (locked: boolean) => void;
   isFullscreen: boolean;
   setIsFullscreen: (full: boolean) => void;
 
   loadingSearchIndex: boolean;
   searchIndexReady: boolean;
   searchIndexProgress: string;
+  categoryCounts: CategoryCountsData;
+  updateCategoryCount: (type: 'live' | 'vod' | 'series', categoryId: string, count: number, categoryName?: string) => void;
+  computeAndSetCategoryCounts: (items: Channel[]) => void;
   loadSearchIndex: (playlistId: string) => Promise<void>;
   buildSearchIndex: (playlistId: string, onProgress?: (msg: string) => void) => Promise<void>;
-  searchChannels: (query: string, typeFilter?: string) => Promise<Channel[]>;
+  searchChannels: (query: string, typeFilter?: string, limit?: number) => Promise<Channel[]>;
   getSearchSuggestions: (query: string) => Promise<string[]>;
   getChannelsByType: (type: 'live' | 'vod' | 'series') => Promise<Channel[]>;
   
@@ -221,12 +258,16 @@ interface AppState {
   clearAppCache: () => Promise<void>;
   
   initializeFromStorage: () => Promise<void>;
-  checkAuthStatus: () => Promise<void>;
+  checkAuthStatus: (options?: { forceReload?: boolean }) => Promise<void>;
+  sendHeartbeatPing: () => Promise<void>;
   isPlayerOpen: boolean;
   setIsPlayerOpen: (isOpen: boolean) => void;
+  lastNonPlayerOrientation: 'portrait' | 'landscape';
+  setLastNonPlayerOrientation: (orientation: 'portrait' | 'landscape') => void;
 
-  syncAdminSubscriptions: (subscriptions: { id: string; host: string; username: string; password: string; name: string }[]) => Promise<void>;
+  syncAdminSubscriptions: (subscriptions: { id: string; host: string; username: string; password: string; name: string }[], options?: { forceReload?: boolean }) => Promise<void>;
   syncM3uPlaylists: (playlists: { name: string; url: string }[]) => Promise<void>;
+  preloadFullPlaylistContent: (playlistId: string, onProgress?: (percent: number, message: string) => void) => Promise<boolean>;
 }
 
 export interface DownloadItem {
@@ -253,14 +294,19 @@ const USER_AGENTS = [
   'TiviMate/4.7.0',
 ];
 
-const fetchWithXHR = (targetUrl: string, acceptHeader?: string): Promise<string> =>
+const fetchWithXHR = (targetUrl: string, acceptHeader?: string, timeoutMs: number = 30000): Promise<string> =>
   new Promise((resolve, reject) => {
+    if (typeof window !== 'undefined' && typeof window.navigator !== 'undefined' && window.navigator.onLine === false) {
+      return reject(new Error('OFFLINE'));
+    }
     const xhr = new XMLHttpRequest();
     xhr.open('GET', targetUrl, true);
-    xhr.timeout = 30000;
+    xhr.timeout = timeoutMs;
     try {
       xhr.setRequestHeader('Accept', acceptHeader || 'application/json, application/x-mpegurl, */*');
-      xhr.setRequestHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+      if (Platform.OS !== 'web') {
+        xhr.setRequestHeader('User-Agent', 'VLC/3.0.18 LibVLC/3.0.18');
+      }
     } catch (_) {}
 
     xhr.onload = () => {
@@ -364,6 +410,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   updateDownloadItem: (id, updates) => {
     set(state => {
+      if (!state.downloads.some(d => d.id === id)) return state;
       const newDownloads = state.downloads.map(d => d.id === id ? { ...d, ...updates } : d);
       AsyncStorage.setItem('downloads', JSON.stringify(newDownloads));
       return { downloads: newDownloads };
@@ -372,9 +419,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   startDownload: async (item) => {
     const fileUri = (FileSystem as any).documentDirectory + `${item.id}.mp4`;
+    const cleanStreamUrl = decodeIfNeeded(item.streamUrl);
     
     const newDownload: DownloadItem = {
       ...item,
+      streamUrl: cleanStreamUrl,
       status: 'downloading',
       progress: 0,
       localUri: Platform.OS === 'web' ? '' : fileUri
@@ -383,9 +432,16 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     if (Platform.OS === 'web') {
       try {
-        const url = `/api/download/start?id=${item.id}&url=${encodeURIComponent(item.streamUrl)}`;
+        const url = `/api/download/start?id=${encodeURIComponent(item.id)}&url=${encodeURIComponent(cleanStreamUrl)}`;
         const res = await fetch(url);
         const data = await res.json();
+
+        // Check if download was cancelled while request was in-flight
+        if (!get().downloads.some(d => d.id === item.id)) {
+          fetch(`/api/download/cancel?id=${encodeURIComponent(item.id)}`).catch(() => {});
+          return;
+        }
+
         get().updateDownloadItem(item.id, { localUri: data.localUri });
 
         if (!(window as any).downloadPoller) {
@@ -394,7 +450,9 @@ export const useAppStore = create<AppState>((set, get) => ({
               const statRes = await fetch('/api/download/status');
               const stats = await statRes.json();
               for (const [id, info] of Object.entries(stats)) {
-                get().updateDownloadItem(id, info as any);
+                if (get().downloads.some(d => d.id === id)) {
+                  get().updateDownloadItem(id, info as any);
+                }
               }
             } catch (e) {}
           }, 1000);
@@ -407,9 +465,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     try {
-      activateKeepAwakeAsync().catch(() => {});
+      activateKeepAwakeAsync('downloads').catch(() => {});
       const downloadResumable = FileSystem.createDownloadResumable(
-        item.streamUrl,
+        cleanStreamUrl,
         fileUri,
         { 
           headers: { 
@@ -445,7 +503,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     } finally {
       delete activeDownloads[item.id];
       if (Object.keys(activeDownloads).length === 0) {
-        deactivateKeepAwake().catch(() => {});
+        deactivateKeepAwake('downloads').catch(() => {});
       }
     }
   },
@@ -478,7 +536,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     if (Platform.OS === 'web') {
       try {
-        await fetch(`/api/download/resume?id=${id}`);
+        const cleanStreamUrl = decodeIfNeeded(download.streamUrl);
+        await fetch(`/api/download/resume?id=${encodeURIComponent(id)}&url=${encodeURIComponent(cleanStreamUrl)}`);
         get().updateDownloadItem(id, { status: 'downloading' });
       } catch (e) {
         console.error("Failed to resume web download", e);
@@ -491,10 +550,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     try {
-      activateKeepAwakeAsync().catch(() => {});
+      activateKeepAwakeAsync('downloads').catch(() => {});
       const parsedResumeData = JSON.parse(download.resumeData);
+      const cleanStreamUrl = decodeIfNeeded(download.streamUrl);
       const downloadResumable = FileSystem.createDownloadResumable(
-        download.streamUrl,
+        cleanStreamUrl,
         download.localUri,
         { 
           headers: { 
@@ -532,23 +592,27 @@ export const useAppStore = create<AppState>((set, get) => ({
     } finally {
       delete activeDownloads[id];
       if (Object.keys(activeDownloads).length === 0) {
-        deactivateKeepAwake().catch(() => {});
+        deactivateKeepAwake('downloads').catch(() => {});
       }
     }
   },
 
   cancelDownload: async (id) => {
+    const download = get().downloads.find(d => d.id === id);
+    const localUri = download?.localUri || ((FileSystem as any).documentDirectory ? (FileSystem as any).documentDirectory + `${id}.mp4` : null);
+
+    // 1. Immediately remove from local state so UI updates instantaneously
+    get().removeDownload(id);
+
     if (Platform.OS === 'web') {
       try {
-        await fetch(`/api/download/cancel?id=${id}`);
+        await fetch(`/api/download/cancel?id=${encodeURIComponent(id)}`);
       } catch (e) {
         console.error("Failed to cancel web download", e);
       }
-      get().removeDownload(id);
       return;
     }
 
-    const download = get().downloads.find(d => d.id === id);
     const resumable = activeDownloads[id];
     if (resumable) {
       try {
@@ -556,11 +620,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       } catch (e) {}
     }
     delete activeDownloads[id];
-    get().removeDownload(id);
     
-    if (download && download.localUri) {
+    if (localUri) {
       try {
-        await FileSystem.deleteAsync(download.localUri, { idempotent: true });
+        await FileSystem.deleteAsync(localUri, { idempotent: true });
       } catch (e) {}
     }
   },
@@ -625,23 +688,35 @@ export const useAppStore = create<AppState>((set, get) => ({
     await AsyncStorage.setItem('playlists', JSON.stringify(currentPlaylists));
   },
 
-  syncAdminSubscriptions: async (subscriptions) => {
-    const btoa = (str: string) => typeof window !== 'undefined' ? window.btoa(str) : Buffer.from(str).toString('base64');
-    const AsyncStorageOriginal = typeof window !== 'undefined' ? require('@react-native-async-storage/async-storage').default : null;
-    
+  syncAdminSubscriptions: async (subscriptions, options) => {
     const adminIds = subscriptions.map(s => `admin_sub_${s.id}`);
     
+    let deletedAdminSubs: string[] = [];
+    try {
+      const stored = await AsyncStorage.getItem('deleted_admin_subs');
+      if (stored) deletedAdminSubs = JSON.parse(stored);
+    } catch (e) {}
+
     // Remove old admin subscriptions that are no longer in the list
     let currentPlaylists = [...get().playlists];
+    
+    // Purge demo playlists if real subscriptions are present
+    if (subscriptions.length > 0) {
+      const hadDemos = currentPlaylists.some(p => p.isDemo || ['p1', 'p2', 'p3'].includes(p.id) || p.url?.startsWith('demo://'));
+      if (hadDemos) {
+        currentPlaylists = currentPlaylists.filter(p => !p.isDemo && !['p1', 'p2', 'p3'].includes(p.id) && !p.url?.startsWith('demo://'));
+      }
+    }
+
     const oldAdminPlaylists = currentPlaylists.filter(p => p.id.startsWith('admin_sub_') && !adminIds.includes(p.id));
+    let hasAnyChanges = oldAdminPlaylists.length > 0;
+
     for (const old of oldAdminPlaylists) {
       currentPlaylists = currentPlaylists.filter(p => p.id !== old.id);
-      if (AsyncStorageOriginal) {
-        try {
-          await AsyncStorageOriginal.removeItem(`channels_${old.id}`);
-          await AsyncStorageOriginal.removeItem(`categories_${old.id}`);
-        } catch(e) {}
-      }
+      try {
+        await AsyncStorage.removeItem(`channels_${old.id}`);
+        await AsyncStorage.removeItem(`categories_${old.id}`);
+      } catch(e) {}
     }
     
     let activePlaylistIdChanged = false;
@@ -652,8 +727,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     // Process new/updated subscriptions
     for (const sub of subscriptions) {
       const playlistId = `admin_sub_${sub.id}`;
-      const credentials = JSON.stringify({ host: sub.host, username: sub.username, password: sub.password });
-      const xtreamUrl = `xtream://${btoa(credentials)}`;
+      if (deletedAdminSubs.includes(playlistId) && !options?.forceReload) {
+        continue;
+      }
+      const hostClean = (sub.host || '').endsWith('/') ? sub.host.slice(0, -1) : (sub.host || '');
+      const credentials = JSON.stringify({ host: hostClean, username: sub.username, password: sub.password });
+      const xtreamUrl = `xtream://${base64Encode(credentials)}`;
       
       const existingIndex = currentPlaylists.findIndex(p => p.id === playlistId);
       let needsUpdate = false;
@@ -661,7 +740,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       
       if (existingIndex >= 0) {
         existing = currentPlaylists[existingIndex];
-        if (existing.url !== xtreamUrl || existing.name !== sub.name) {
+        const nameChanged = sub.name && existing.name !== sub.name;
+        const urlChanged = existing.url !== xtreamUrl;
+        if (options?.forceReload || urlChanged || nameChanged) {
           needsUpdate = true;
         }
       } else {
@@ -669,23 +750,23 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       
       if (needsUpdate) {
+        hasAnyChanges = true;
         try {
-          const hostClean = sub.host.endsWith('/') ? sub.host.slice(0, -1) : sub.host;
           const m3uUrl = `${hostClean}/get.php?username=${sub.username}&password=${sub.password}&type=m3u_plus&output=ts`;
           const { channels, expireText } = await get().loadPlaylistFromUrl(playlistId, m3uUrl);
           
           if (existingIndex >= 0 && existing) {
-            currentPlaylists[existingIndex] = { ...existing, url: xtreamUrl, name: sub.name, channels, updated: expireText || 'Active', lastUpdatedTimestamp: Date.now() };
+            currentPlaylists[existingIndex] = { ...existing, url: xtreamUrl, name: "admin_subscription", channels, updated: expireText || 'Active', lastUpdatedTimestamp: Date.now() };
           } else {
             currentPlaylists.push({
               id: playlistId,
-              name: sub.name || "admin_subscription",
+              name: "admin_subscription",
               url: xtreamUrl,
               channels,
               updated: expireText || 'Active',
               lastUpdatedTimestamp: Date.now(),
             });
-            if (!get().activePlaylistId || activePlaylistIdChanged) {
+            if (!get().activePlaylistId || ['p1', 'p2', 'p3'].includes(get().activePlaylistId) || activePlaylistIdChanged) {
               set({ activePlaylistId: playlistId });
               activePlaylistIdChanged = false;
             }
@@ -696,16 +777,29 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     }
     
-    set({ playlists: currentPlaylists });
-    if (AsyncStorageOriginal) {
+    // Ensure active playlist is valid and not stuck on demo
+    const currentActive = get().activePlaylistId;
+    const isCurrentActiveInvalid = !currentActive || ['p1', 'p2', 'p3'].includes(currentActive) || !currentPlaylists.some(p => p.id === currentActive);
+    
+    if (isCurrentActiveInvalid && currentPlaylists.length > 0) {
+      const newActiveId = currentPlaylists[0].id;
+      set({ activePlaylistId: newActiveId });
       try {
-        await AsyncStorageOriginal.setItem('playlists', JSON.stringify(currentPlaylists));
-        const currentActive = get().activePlaylistId;
-        if (currentActive && !currentPlaylists.some(p => p.id === currentActive) && currentPlaylists.length > 0) {
-          set({ activePlaylistId: currentPlaylists[0].id });
-          await AsyncStorageOriginal.setItem('activePlaylistId', currentPlaylists[0].id);
-        } else if (currentActive) {
-          await AsyncStorageOriginal.setItem('activePlaylistId', currentActive);
+        await AsyncStorage.setItem('activePlaylistId', newActiveId);
+        const cachedCats = await AsyncStorage.getItem(`categories_${newActiveId}`);
+        if (cachedCats) set({ activeCategories: JSON.parse(cachedCats) });
+      } catch (e) {}
+      hasAnyChanges = true;
+    }
+
+    // Only update state and write to disk if there were actual changes!
+    if (hasAnyChanges) {
+      set({ playlists: currentPlaylists });
+      try {
+        await AsyncStorage.setItem('playlists', JSON.stringify(currentPlaylists));
+        const finalActive = get().activePlaylistId;
+        if (finalActive) {
+          await AsyncStorage.setItem('activePlaylistId', finalActive);
         }
       } catch(e){}
     }
@@ -757,7 +851,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   channels: [],
   loadingChannels: false,
   subscriptionExpired: false,
-  setSubscriptionExpired: (expired) => set({ subscriptionExpired: expired }),
+  setSubscriptionExpired: (expired) => set({ subscriptionExpired: expired, isAppLocked: expired }),
+  isTrialActive: true,
+  trialDaysRemaining: 7,
+  trialHoursRemaining: 168,
+  trialEndsAt: null,
+  serverTime: null,
+  serverTimeOffset: 0,
+  getServerTime: () => new Date(Date.now() + (get().serverTimeOffset || 0)),
+  isAppLocked: false,
+  setAppLocked: (locked) => set({ isAppLocked: locked, subscriptionExpired: locked }),
   isFullscreen: false,
   setIsFullscreen: (full) => set({ isFullscreen: full }),
 
@@ -765,20 +868,126 @@ export const useAppStore = create<AppState>((set, get) => ({
   searchIndexReady: false,
   searchIndexProgress: '',
 
+  categoryCounts: {
+    live: {},
+    vod: {},
+    series: {},
+    totals: { live: 0, vod: 0, series: 0 }
+  },
+
+  updateCategoryCount: (type, categoryId, count, categoryName) => {
+    set((state) => {
+      const current = state.categoryCounts[type] || {};
+      const updated = {
+        ...current,
+        [String(categoryId)]: count,
+        ...(categoryName ? { [categoryName]: count } : {})
+      };
+      return {
+        categoryCounts: {
+          ...state.categoryCounts,
+          [type]: updated
+        }
+      };
+    });
+  },
+
+  computeAndSetCategoryCounts: (items) => {
+    const counts: CategoryCountsData = {
+      live: {},
+      vod: {},
+      series: {},
+      totals: { live: 0, vod: 0, series: 0 }
+    };
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.type && counts[item.type as 'live' | 'vod' | 'series']) {
+        const t = item.type as 'live' | 'vod' | 'series';
+        counts.totals[t]++;
+        if (item.categoryId) {
+          counts[t][String(item.categoryId)] = (counts[t][String(item.categoryId)] || 0) + 1;
+        }
+        if (item.category) {
+          counts[t][item.category] = (counts[t][item.category] || 0) + 1;
+        }
+      }
+    }
+    set({ categoryCounts: counts });
+    const activeId = get().activePlaylistId;
+    if (activeId) {
+      AsyncStorage.setItem(`category_counts_${activeId}`, JSON.stringify(counts)).catch(() => {});
+    }
+  },
+
   cachedHomeContent: null,
   setCachedHomeContent: (playlistId, rows, featured) => {
     set({ cachedHomeContent: { playlistId, rows, featured } });
   },
 
-  searchChannels: async (query: string, typeFilter?: string) => {
+  searchChannels: async (query: string, typeFilter?: string, limit: number = 200) => {
     if (!query) return [];
-    const q = query.toLowerCase();
+    const q = query.toLowerCase().trim();
+    if (!q) return [];
     
+    // Ensure search index is loaded if empty
+    if (globalSearchIndex.length === 0) {
+      const activeId = get().activePlaylistId;
+      if (activeId) {
+        try {
+          const cachedIndex = await AsyncStorage.getItem(`search_index_${activeId}`);
+          if (cachedIndex) {
+            const parsed = JSON.parse(cachedIndex);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              globalSearchIndex = parsed;
+              set({ searchIndexReady: true });
+            }
+          }
+        } catch (e) {}
+
+        if (globalSearchIndex.length === 0) {
+          try {
+            const cachedChannels = await AsyncStorage.getItem(`channels_${activeId}`);
+            if (cachedChannels) {
+              const parsed = JSON.parse(cachedChannels);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                globalSearchIndex = parsed;
+                set({ searchIndexReady: true });
+              }
+            }
+          } catch (e) {}
+        }
+
+        if (globalSearchIndex.length === 0 && get().playlistChannels[activeId]?.length > 0) {
+          globalSearchIndex = get().playlistChannels[activeId];
+          set({ searchIndexReady: true });
+        }
+
+        if (globalSearchIndex.length === 0 && !get().loadingSearchIndex) {
+          get().loadSearchIndex(activeId).catch(() => {});
+        }
+      }
+    }
+
+    // Fallback to loaded memory channels if search index is still empty
+    const searchSource = globalSearchIndex.length > 0 ? globalSearchIndex : (() => {
+      const fallbackList: Channel[] = [];
+      for (const [, cacheEntry] of globalChannelsCache.entries()) {
+        for (const item of cacheEntry.data) {
+          if (!fallbackList.some(r => r.id === item.id)) {
+            fallbackList.push(item);
+          }
+        }
+      }
+      return fallbackList;
+    })();
+
+    const maxResults = limit || 200;
+
     // إذا كان هناك فلتر محدد، ابحث فقط في هذا النوع
     if (typeFilter && typeFilter !== 'all') {
       const results: Channel[] = [];
-      for (const item of globalSearchIndex) {
-        if (results.length >= 50) break;
+      for (const item of searchSource) {
+        if (results.length >= maxResults) break;
         if (item.type !== typeFilter) continue;
         const matchName = item.name && item.name.toLowerCase().includes(q);
         const matchCategory = item.category && item.category.toLowerCase().includes(q);
@@ -789,14 +998,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       return results;
     }
     
-    // بدون فلتر: اجمع نتائج من كل نوع بالتساوي
+    // بدون فلتر: اجمع نتائج من كل نوع
     const liveResults: Channel[] = [];
     const vodResults: Channel[] = [];
     const seriesResults: Channel[] = [];
-    const MAX_PER_TYPE = 20;
+    const MAX_PER_TYPE = Math.floor(maxResults / 3);
     
-    for (const item of globalSearchIndex) {
-      // توقف إذا امتلأت كل الأنواع
+    for (const item of searchSource) {
       if (liveResults.length >= MAX_PER_TYPE && 
           vodResults.length >= MAX_PER_TYPE && 
           seriesResults.length >= MAX_PER_TYPE) break;
@@ -815,6 +1023,25 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     
     return [...liveResults, ...vodResults, ...seriesResults];
+  },
+
+  getChannelsByType: async (type: 'live' | 'vod' | 'series') => {
+    if (globalSearchIndex.length === 0) {
+      const activeId = get().activePlaylistId;
+      if (activeId) {
+        try {
+          const cachedIndex = await AsyncStorage.getItem(`search_index_${activeId}`);
+          if (cachedIndex) {
+            const parsed = JSON.parse(cachedIndex);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              globalSearchIndex = parsed;
+              set({ searchIndexReady: true });
+            }
+          }
+        } catch (e) {}
+      }
+    }
+    return globalSearchIndex.filter(c => c.type === type);
   },
 
   getSearchSuggestions: async (query: string) => {
@@ -872,24 +1099,41 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     await AsyncStorage.setItem('playlists', JSON.stringify(newPlaylists));
     await AsyncStorage.setItem('activePlaylistId', playlist.id);
-
-    // Build the search index automatically in the background
-    get().buildSearchIndex(playlist.id).catch((err) => {
-      console.error('[addPlaylist] Auto-building search index failed:', err);
-    });
   },
 
   deletePlaylist: async (id) => {
     const newPlaylists = get().playlists.filter((p) => p.id !== id);
     const newChannels = { ...get().playlistChannels };
     delete newChannels[id];
-    set({ playlists: newPlaylists, playlistChannels: newChannels, activeCategories: null, channels: [] });
-    if (get().activePlaylistId === id) {
-      set({ activePlaylistId: newPlaylists[0]?.id ?? '' });
-    }
+    
+    const wasActive = get().activePlaylistId === id;
+    const nextActiveId = newPlaylists[0]?.id ?? '';
+    
+    set({
+      playlists: newPlaylists,
+      playlistChannels: newChannels,
+      ...(wasActive ? { activePlaylistId: nextActiveId, activeCategories: null, channels: [] } : {})
+    });
+    
     await AsyncStorage.setItem('playlists', JSON.stringify(newPlaylists));
+    if (wasActive) {
+      await AsyncStorage.setItem('activePlaylistId', nextActiveId);
+    }
+    
     await AsyncStorage.removeItem(`channels_${id}`);
     await AsyncStorage.removeItem(`categories_${id}`);
+    await AsyncStorage.removeItem(`search_index_${id}`);
+    
+    if (id.startsWith('admin_sub_')) {
+      try {
+        const storedDeleted = await AsyncStorage.getItem('deleted_admin_subs');
+        const list = storedDeleted ? JSON.parse(storedDeleted) : [];
+        if (!list.includes(id)) {
+          list.push(id);
+          await AsyncStorage.setItem('deleted_admin_subs', JSON.stringify(list));
+        }
+      } catch (e) {}
+    }
   },
 
   setActivePlaylist: async (id) => {
@@ -916,15 +1160,25 @@ export const useAppStore = create<AppState>((set, get) => ({
       } catch (e) {
         set({ activeCategories: null });
       }
-    }
 
-    // Auto-load search index and build it in the background
-    try {
-      get().loadSearchIndex(id).catch((err) => {
-        console.error('[setActivePlaylist] Error building search index:', err);
-      });
-    } catch (err) {
-      console.error('[setActivePlaylist] Failed starting search index build:', err);
+      if (id) {
+        try {
+          const cachedCounts = await AsyncStorage.getItem(`category_counts_${id}`);
+          if (cachedCounts) {
+            set({ categoryCounts: JSON.parse(cachedCounts) });
+          } else {
+            const cachedSearchIdx = await AsyncStorage.getItem(`search_index_${id}`);
+            if (cachedSearchIdx) {
+              const parsed = JSON.parse(cachedSearchIdx);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                globalSearchIndex = parsed;
+                set({ searchIndexReady: true });
+                get().computeAndSetCategoryCounts(parsed);
+              }
+            }
+          }
+        } catch (e) {}
+      }
     }
   },
 
@@ -937,15 +1191,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   loadPlaylistFromUrl: async (playlistId, url, onProgress) => {
     onProgress?.('Connecting to server...');
 
-    // Build the list of URLs to try for this playlist load.
-    // For Xtream Codes the url was already built by playlists.tsx as the
-    // get.php URL; we also generate a simplified path variant as fallback.
     let getPhpMatch = url.match(/^(https?:\/\/[^/]+)\/get\.php\?username=([^&]+)&password=([^&]+)/);
     
     if (url.startsWith('xtream://')) {
       try {
         const b64 = url.replace('xtream://', '');
-        const creds = JSON.parse(typeof window !== 'undefined' ? window.atob(b64) : Buffer.from(b64, 'base64').toString());
+        const creds = JSON.parse(base64Decode(b64));
         getPhpMatch = [url, creds.host, creds.username, creds.password];
       } catch(e) {}
     }
@@ -953,14 +1204,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     // If it is an Xtream Codes URL, try fetching via player_api.php dynamically
     // to avoid the IPTV server crashing with a 500 error on get.php.
     if (getPhpMatch) {
-      const [, host, username, password] = getPhpMatch;
+      const [, rawHost, username, password] = getPhpMatch;
+      const host = (rawHost || '').endsWith('/') ? rawHost.slice(0, -1) : (rawHost || '');
       
+      const isWeb = Platform.OS === 'web';
       const fetchJsonWithFallback = async (endpoint: string): Promise<any> => {
-        const targetUrls = [
+        const targetUrls = isWeb ? [
           `/proxy?url=${encodeURIComponent(endpoint)}`,
           endpoint,
           `https://corsproxy.io/?url=${encodeURIComponent(endpoint)}`,
           `https://api.allorigins.win/raw?url=${encodeURIComponent(endpoint)}`
+        ] : [
+          endpoint
         ];
         let lastErr: Error = new Error('JSON fetch failed');
         for (const u of targetUrls) {
@@ -1252,16 +1507,26 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   getChannelsForCategory: async (playlistId, type, categoryId, categoryName) => {
     console.log(`[getChannelsForCategory] Called for playlistId: ${playlistId}, type: ${type}, categoryId: ${categoryId}, categoryName: ${categoryName}`);
-    if (playlistId === 'p1' || playlistId === 'p2' || playlistId === 'p3') {
-      const filtered = MOCK_CHANNELS.filter(c => c.type === type && (c.category === categoryId || categoryId === 'All'));
-      return filtered;
+    let effectivePlaylistId = playlistId;
+    if (effectivePlaylistId === 'p1' || effectivePlaylistId === 'p2' || effectivePlaylistId === 'p3') {
+      const real = get().playlists.find(p => !p.isDemo && !['p1', 'p2', 'p3'].includes(p.id) && !p.url?.startsWith('demo://'));
+      if (real) {
+        effectivePlaylistId = real.id;
+        if (get().activePlaylistId !== real.id) {
+          set({ activePlaylistId: real.id });
+          AsyncStorage.setItem('activePlaylistId', real.id).catch(() => {});
+        }
+      } else {
+        const filtered = MOCK_CHANNELS.filter(c => c.type === type && (c.category === categoryId || categoryId === 'All'));
+        return filtered;
+      }
     }
     
     try {
-      const storageKey = `channels_v4_${playlistId}_${type}_${categoryId}`;
+      const storageKey = `channels_v4_${effectivePlaylistId}_${type}_${categoryId}`;
       
       const memCache = globalChannelsCache.get(storageKey);
-      if (memCache && (Date.now() - memCache.timestamp < CACHE_TTL)) {
+      if (memCache && (Date.now() - memCache.timestamp < CACHE_TTL) && memCache.data && memCache.data.length > 0) {
         console.log(`[getChannelsForCategory] Found in memory cache for ${storageKey}`);
         return memCache.data;
       }
@@ -1269,13 +1534,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       const cached = await AsyncStorage.getItem(storageKey);
       
       if (cached) {
-        const parsed = JSON.parse(cached);
-        globalChannelsCache.set(storageKey, { data: parsed, timestamp: Date.now() });
-        console.log(`[getChannelsForCategory] Found cached channels in AsyncStorage. Count: ${parsed.length}`);
-        return parsed;
+        try {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            globalChannelsCache.set(storageKey, { data: parsed, timestamp: Date.now() });
+            console.log(`[getChannelsForCategory] Found cached channels in AsyncStorage. Count: ${parsed.length}`);
+            get().updateCategoryCount(type, categoryId, parsed.length, categoryName);
+            return parsed;
+          }
+        } catch (e) {}
       }
       
-      const p = get().playlists.find(x => x.id === playlistId);
+      const p = get().playlists.find(x => x.id === effectivePlaylistId);
       const isXtream = p && (p.url.startsWith('xtream://') || p.url.includes('/get.php?'));
       
       if (isXtream) {
@@ -1301,56 +1571,50 @@ export const useAppStore = create<AppState>((set, get) => ({
         else if (type === 'vod') action = 'get_vod_streams';
         else if (type === 'series') action = 'get_series';
         
-        const fetchUrl = `${config.host}/player_api.php?username=${config.username}&password=${config.password}&action=${action}&category_id=${categoryId}&_t=${Date.now()}`;
-        console.log(`[getChannelsForCategory] Fetching streams from host: ${config.host}, url: ${fetchUrl}`);
+        const hostClean = (config.host || '').endsWith('/') ? config.host.slice(0, -1) : (config.host || '');
+        const fetchUrl = `${hostClean}/player_api.php?username=${config.username}&password=${config.password}&action=${action}&category_id=${categoryId}`;
+        console.log(`[getChannelsForCategory] Fetching streams from host: ${hostClean}, url: ${fetchUrl}`);
         
-        const targetUrls = [
-          fetchUrl,
-          `https://corsproxy.io/?url=${encodeURIComponent(fetchUrl)}`,
-          `https://api.allorigins.win/raw?url=${encodeURIComponent(fetchUrl)}`
-        ];
+        const isWeb = Platform.OS === 'web';
+        const isElectron = isWeb && typeof window !== 'undefined' && (
+          (window as any).process?.type === 'renderer' ||
+          window.navigator?.userAgent?.includes('Electron') ||
+          window.location?.hostname === 'localhost' ||
+          window.location?.port === '1337'
+        );
+
+        const targetUrls: string[] = [];
+        if (isElectron) {
+          targetUrls.push(`/proxy?url=${encodeURIComponent(fetchUrl)}`);
+          targetUrls.push(fetchUrl);
+        } else if (isWeb) {
+          targetUrls.push(fetchUrl);
+          targetUrls.push(`https://corsproxy.io/?url=${encodeURIComponent(fetchUrl)}`);
+          targetUrls.push(`https://api.allorigins.win/raw?url=${encodeURIComponent(fetchUrl)}`);
+        } else {
+          targetUrls.push(fetchUrl);
+        }
         
         let text = '';
         let fetched = false;
         
-        try {
-          const res = await fetch(fetchUrl, {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-          });
-          if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-          text = await res.text();
-          fetched = true;
-        } catch (fetchErr) {
-          console.warn(`[getChannelsForCategory] Direct fetch failed, trying proxies. Error: ${fetchErr}`);
-          for (let i = 0; i < targetUrls.length; i++) {
-            const u = targetUrls[i];
-            try {
-              console.log(`[getChannelsForCategory] Fetching attempt ${i + 1}/${targetUrls.length} from: ${u}`);
-              text = await new Promise((resolve, reject) => {
-                const xhr = new XMLHttpRequest();
-                xhr.open('GET', u, true);
-                xhr.timeout = 20000;
-                xhr.onload = () => {
-                  if (xhr.status >= 200 && xhr.status < 300) {
-                    if (xhr.responseText && xhr.responseText.trim().length > 0) resolve(xhr.responseText);
-                    else reject(new Error(`Empty response, status: ${xhr.status}`));
-                  } else {
-                    reject(new Error(`HTTP status error: ${xhr.status}`));
-                  }
-                };
-                xhr.onerror = () => reject(new Error('Network error'));
-                xhr.ontimeout = () => reject(new Error('Timeout'));
-                xhr.send();
-              });
-              console.log(`[getChannelsForCategory] Fetching succeeded from: ${u}. Response text sample (first 100 chars): ${text.substring(0, 100)}`);
-              fetched = true;
-              break;
-            } catch (e: any) {
-              console.warn(`[getChannelsForCategory] Failed fetching from ${u}: ${e.message || e}`);
-            }
+        let lastFetchErr = new Error('Init');
+        for (let i = 0; i < targetUrls.length; i++) {
+          const u = targetUrls[i];
+          try {
+            console.log(`[getChannelsForCategory] Fetching attempt ${i + 1}/${targetUrls.length} from: ${u}`);
+            text = await fetchWithXHR(u, undefined, 10000);
+            console.log(`[getChannelsForCategory] Fetching succeeded from: ${u}. Response text sample (first 100 chars): ${text.substring(0, 100)}`);
+            fetched = true;
+            break;
+          } catch (e: any) {
+            lastFetchErr = e;
+            console.warn(`[getChannelsForCategory] Failed fetching from ${u}: ${e.message || e}`);
           }
+        }
+        
+        if (!fetched) {
+          console.warn(`[getChannelsForCategory] All target URLs failed. Last error: ${lastFetchErr}`);
         }
         
         if (fetched) {
@@ -1375,7 +1639,7 @@ export const useAppStore = create<AppState>((set, get) => ({
               
               if (type === 'live' && item.stream_id) {
                 const ext = get().moreOptions.useM3uFormatInStreamUrl ? '.m3u8' : (get().moreOptions.useExtensionInStreamUrl ? '.ts' : '');
-                const streamUrl = `${config.host}/live/${config.username}/${config.password}/${item.stream_id}${ext}`;
+                const streamUrl = `${hostClean}/live/${config.username}/${config.password}/${item.stream_id}${ext}`;
                 const hasArchive = item.tv_archive === 1 || item.tv_archive === '1';
                 const archiveDuration = parseInt(item.tv_archive_duration, 10) || 0;
                 channelsList.push({
@@ -1395,7 +1659,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                 });
               } else if (type === 'vod' && item.stream_id) {
                 const ext = get().moreOptions.useExtensionInStreamUrl ? `.${item.container_extension || 'mp4'}` : '';
-                const streamUrl = `${config.host}/movie/${config.username}/${config.password}/${item.stream_id}${ext}`;
+                const streamUrl = `${hostClean}/movie/${config.username}/${config.password}/${item.stream_id}${ext}`;
                 channelsList.push({
                   id: `xt_vod_${item.stream_id}`,
                   name: decodedName,
@@ -1409,7 +1673,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                   type: 'vod'
                 });
               } else if (type === 'series' && item.series_id) {
-                const streamUrl = `${config.host}/series/${config.username}/${config.password}/${item.series_id}`;
+                const streamUrl = `${hostClean}/series/${config.username}/${config.password}/${item.series_id}`;
                 if (channelsList.length > 0) {
                   // Do not store in cache to prevent OOM crashes
                 }
@@ -1432,11 +1696,14 @@ export const useAppStore = create<AppState>((set, get) => ({
           }
           
           console.log(`[getChannelsForCategory] Processed ${channelsList.length} channels. Live fetch successful.`);
+          get().updateCategoryCount(type, categoryId, channelsList.length, categoryName);
           
-          // Store in disk cache
-          AsyncStorage.setItem(storageKey, JSON.stringify(channelsList)).catch(e => console.warn('Cache write failed', e));
-          // Store in memory cache
-          globalChannelsCache.set(storageKey, { data: channelsList, timestamp: Date.now() });
+          // Store in disk cache only if non-empty
+          if (channelsList.length > 0) {
+            AsyncStorage.setItem(storageKey, JSON.stringify(channelsList)).catch(e => console.warn('Cache write failed', e));
+            // Store in memory cache
+            globalChannelsCache.set(storageKey, { data: channelsList, timestamp: Date.now() });
+          }
           
           return channelsList;
         } else {
@@ -1469,7 +1736,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   getActiveChannels: (type) => {
     const activeId = get().activePlaylistId;
     if (activeId === 'p1' || activeId === 'p2' || activeId === 'p3') {
-      return MOCK_CHANNELS.filter((c) => c.type === type);
+      const real = get().playlists.find(p => !p.isDemo && !['p1', 'p2', 'p3'].includes(p.id) && !p.url?.startsWith('demo://'));
+      if (!real) {
+        return MOCK_CHANNELS.filter((c) => c.type === type);
+      }
     }
     return get().channels.filter((c) => c.type === type);
   },
@@ -1485,17 +1755,22 @@ export const useAppStore = create<AppState>((set, get) => ({
   favorites: [],
   favoriteItems: [],
   toggleFavorite: (item) => {
-    const favs = get().favorites;
+    const favs = get().favorites || [];
     const items = get().favoriteItems || [];
-    const id = item.id;
+    const id = String(item.id || '');
+    const url = item.streamUrl ? String(item.streamUrl) : '';
+
+    const isFav = favs.some((f) => String(f) === id || (url && String(f) === url)) ||
+                  items.some((x) => String(x.id) === id || (url && x.streamUrl === url));
+
     let newFavs: string[];
     let newItems: Channel[];
-    if (favs.includes(id)) {
-      newFavs = favs.filter((f) => f !== id);
-      newItems = items.filter((x) => x.id !== id);
+    if (isFav) {
+      newFavs = favs.filter((f) => String(f) !== id && (!url || String(f) !== url));
+      newItems = items.filter((x) => String(x.id) !== id && (!url || x.streamUrl !== url));
     } else {
-      newFavs = [...favs, id];
-      newItems = [...items, item];
+      newFavs = [...favs.filter((f) => String(f) !== id && (!url || String(f) !== url)), id];
+      newItems = [...items.filter((x) => String(x.id) !== id && (!url || x.streamUrl !== url)), item];
     }
     set({ favorites: newFavs, favoriteItems: newItems });
     AsyncStorage.setItem('favorites', JSON.stringify(newFavs));
@@ -1504,6 +1779,15 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   isPlayerOpen: false,
   setIsPlayerOpen: (isOpen) => set({ isPlayerOpen: isOpen }),
+  lastNonPlayerOrientation: (() => {
+    try {
+      const dim = Dimensions.get('window');
+      return dim.height > dim.width ? 'portrait' : 'landscape';
+    } catch {
+      return 'landscape';
+    }
+  })(),
+  setLastNonPlayerOrientation: (orientation) => set({ lastNonPlayerOrientation: orientation }),
 
   settings: {
     quality: 'Auto',
@@ -1525,7 +1809,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => {
       const newSettings = { ...state.settings, language: lang };
       AsyncStorage.setItem('settings', JSON.stringify(newSettings));
-      return { settings: newSettings };
+      return { 
+        settings: newSettings,
+        cachedHomeContent: null,
+        refreshCounter: (state.refreshCounter || 0) + 1,
+      };
     });
   },
 
@@ -1548,40 +1836,115 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   appIsReady: false,
   appExpiry: null,
+  globalToast: null,
+  showToast: (title, message, type = 'info') => set({ globalToast: { title, message, type } }),
+  hideToast: () => set({ globalToast: null }),
+  refreshCounter: 0,
+  isNetworkOnline: true,
+  setIsNetworkOnline: (status) => set({ isNetworkOnline: status }),
 
-  checkAuthStatus: async () => {
+  checkAuthStatus: async (options) => {
     try {
       const deviceData = await getOrCreateDeviceData();
       let SERVER_URL = 'https://entecstreamingnestjs-production.up.railway.app/api';
-      
-      if (__DEV__) {
-        SERVER_URL = Platform.OS === 'android' ? 'http://10.0.2.2:3000/api' : 'http://localhost:3000/api';
-      }
 
       const response = await fetch(`${SERVER_URL}/client/auth`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        body: JSON.stringify({ macAddress: deviceData.macAddress, deviceKey: deviceData.deviceKey }),
+        body: JSON.stringify({ 
+          macAddress: deviceData.macAddress, 
+          deviceKey: deviceData.deviceKey,
+          clientTime: new Date().toISOString()
+        }),
       });
       
+      const data = await response.json().catch(() => null);
+
+      if (data && data.serverTime) {
+        const sTime = Date.parse(data.serverTime);
+        if (!isNaN(sTime)) {
+          set({ serverTime: data.serverTime, serverTimeOffset: sTime - Date.now() });
+        }
+      }
+
+      if (response.status === 403 && data && (data.error === 'trial_expired' || data.isAppLocked)) {
+        console.log('[checkAuthStatus] App trial expired. App is locked.');
+        set({ 
+          isAppLocked: true, 
+          subscriptionExpired: true, 
+          isTrialActive: false,
+          trialDaysRemaining: 0,
+          trialEndsAt: data.trial?.trialEndsAt || data.trialEndsAt || null,
+        });
+        return;
+      }
+
       if (response.status === 401 || response.status === 403 || response.status === 404) {
         console.log('[checkAuthStatus] User deleted or blocked. Logging out.');
         get().logout();
-      } else if (response.ok) {
-        const data = await response.json();
-        if (data && data.customer && data.customer.subscriptions) {
-           // Get appExpiry from the first matching subscription (they all share the same for a MAC)
+        set({ isAppLocked: true, subscriptionExpired: true });
+      } else if (response.ok && data) {
+        const trial = data.trial;
+        if (trial) {
+          set({
+            isTrialActive: trial.isTrialActive,
+            trialDaysRemaining: trial.daysRemaining ?? trial.trialDaysRemaining ?? 0,
+            trialHoursRemaining: trial.hoursRemaining ?? 0,
+            trialEndsAt: trial.trialEndsAt || null,
+            isAppLocked: data.isAppLocked === true,
+            subscriptionExpired: data.isAppLocked === true,
+          });
+        }
+
+        if (data.customer && data.customer.subscriptions) {
            const currentMacSub = data.customer.subscriptions.find((s: any) => s.macAddress === deviceData.macAddress);
            if (currentMacSub && currentMacSub.appExpiry) {
              set({ appExpiry: currentMacSub.appExpiry });
            } else {
-             set({ appExpiry: null });
+             set({ appExpiry: data.appExpiry || null });
            }
-           await get().syncAdminSubscriptions(data.customer.subscriptions);
+           await get().syncAdminSubscriptions(data.customer.subscriptions, options);
         }
       }
     } catch (err) {
       console.warn('[checkAuthStatus] Error checking auth status', err);
+    }
+  },
+
+  sendHeartbeatPing: async () => {
+    try {
+      const deviceData = await getOrCreateDeviceData();
+      const SERVER_URL = 'https://entecstreamingnestjs-production.up.railway.app/api';
+      const response = await fetch(`${SERVER_URL}/client/ping`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ 
+          macAddress: deviceData.macAddress, 
+          clientTime: new Date().toISOString()
+        }),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.serverTime) {
+          const sTime = Date.parse(data.serverTime);
+          if (!isNaN(sTime)) {
+            set({ serverTime: data.serverTime, serverTimeOffset: sTime - Date.now() });
+          }
+        }
+        if (data.trial) {
+          set({
+            isTrialActive: data.trial.isTrialActive,
+            trialDaysRemaining: data.trial.daysRemaining ?? data.trial.trialDaysRemaining ?? 0,
+            trialHoursRemaining: data.trial.hoursRemaining ?? 0,
+            trialEndsAt: data.trial.trialEndsAt || null,
+          });
+        }
+        if (data.isAppLocked) {
+          set({ isAppLocked: true, subscriptionExpired: true, isTrialActive: false });
+        }
+      }
+    } catch (e) {
+      // Silent heartbeat ping failure
     }
   },
 
@@ -1610,34 +1973,101 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       let SERVER_URL = 'https://entecstreamingnestjs-production.up.railway.app/api';
       
-      if (__DEV__) {
-        const hostUri = Constants.expoConfig?.hostUri;
-        if (hostUri) {
-          const ip = hostUri.split(':')[0];
-          SERVER_URL = `http://${ip}:3000/api`;
-        } else {
-          SERVER_URL = Platform.OS === 'android' ? 'http://10.0.2.2:3000/api' : 'http://localhost:3000/api';
-        }
-      }
+      // Use live server unconditionally per user request
+      // if (__DEV__) {
+      //   const hostUri = Constants.expoConfig?.hostUri;
+      //   if (hostUri) {
+      //     const ip = hostUri.split(':')[0];
+      //     SERVER_URL = `http://${ip}:3000/api`;
+      //   } else {
+      //     SERVER_URL = Platform.OS === 'android' ? 'http://10.0.2.2:3000/api' : 'http://localhost:3000/api';
+      //   }
+      // }
 
       let isBackendAuthorized = false;
+      
+      const fetchWithTimeout = (url: string, options: any = {}, timeoutMs = 10000) => {
+        return Promise.race([
+          fetch(url, options),
+          new Promise<Response>((_, reject) => 
+            setTimeout(() => reject(new Error('Timeout')), timeoutMs)
+          )
+        ]);
+      };
+
       try {
         // Register Device First
-        await fetch(`${SERVER_URL}/client/register-device`, {
+        const regRes = await fetchWithTimeout(`${SERVER_URL}/client/register-device`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
           body: JSON.stringify({ macAddress: deviceData.macAddress, deviceKey: deviceData.deviceKey }),
-        });
+        }, 5000);
 
-        const response = await fetch(`${SERVER_URL}/client/auth`, {
+        if (regRes.ok) {
+          const regData = await regRes.json();
+          if (regData.serverTime) {
+            const sTime = Date.parse(regData.serverTime);
+            if (!isNaN(sTime)) {
+              set({ serverTime: regData.serverTime, serverTimeOffset: sTime - Date.now() });
+            }
+          }
+          if (regData.trial) {
+            set({
+              isTrialActive: regData.trial.isTrialActive,
+              trialDaysRemaining: regData.trial.daysRemaining ?? regData.trial.trialDaysRemaining ?? 0,
+              trialHoursRemaining: regData.trial.hoursRemaining ?? 0,
+              trialEndsAt: regData.trial.trialEndsAt || null,
+              isAppLocked: regData.isAppLocked === true,
+              subscriptionExpired: regData.isAppLocked === true,
+            });
+          }
+        }
+
+        const response = await fetchWithTimeout(`${SERVER_URL}/client/auth`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-          body: JSON.stringify({ macAddress: deviceData.macAddress, deviceKey: deviceData.deviceKey }),
-        });
-        if (response.ok) {
+          body: JSON.stringify({ 
+            macAddress: deviceData.macAddress, 
+            deviceKey: deviceData.deviceKey,
+            clientTime: new Date().toISOString()
+          }),
+        }, 5000);
+
+        const authData = await response.json().catch(() => null);
+
+        if (authData && authData.serverTime) {
+          const sTime = Date.parse(authData.serverTime);
+          if (!isNaN(sTime)) {
+            set({ serverTime: authData.serverTime, serverTimeOffset: sTime - Date.now() });
+          }
+        }
+
+        if (response.ok && authData) {
           isBackendAuthorized = true;
+          if (authData.trial) {
+            set({
+              isTrialActive: authData.trial.isTrialActive,
+              trialDaysRemaining: authData.trial.daysRemaining ?? authData.trial.trialDaysRemaining ?? 0,
+              trialHoursRemaining: authData.trial.hoursRemaining ?? 0,
+              trialEndsAt: authData.trial.trialEndsAt || null,
+              isAppLocked: authData.isAppLocked === true,
+              subscriptionExpired: authData.isAppLocked === true,
+            });
+          }
+        } else if (response.status === 403 && authData && (authData.error === 'trial_expired' || authData.isAppLocked)) {
+          isBackendAuthorized = false;
+          set({
+            isAppLocked: true,
+            subscriptionExpired: true,
+            isTrialActive: false,
+            trialDaysRemaining: 0,
+            trialEndsAt: authData.trial?.trialEndsAt || authData.trialEndsAt || null,
+          });
+          await AsyncStorage.removeItem('user');
+          await AsyncStorage.removeItem('activePlaylistId');
         } else if (response.status === 401 || response.status === 403 || response.status === 404) {
           isBackendAuthorized = false;
+          set({ isAppLocked: true, subscriptionExpired: true });
           await AsyncStorage.removeItem('user');
           await AsyncStorage.removeItem('activePlaylistId');
         } else {
@@ -1686,13 +2116,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       const playlistsStr = await AsyncStorage.getItem('playlists');
       let loadedPlaylists: Playlist[] = [];
       if (playlistsStr) {
-        loadedPlaylists = JSON.parse(playlistsStr).filter((p: any) => !p.isDemo);
+        loadedPlaylists = JSON.parse(playlistsStr)
+          .filter((p: any) => !p.isDemo && !p.url?.startsWith('demo://') && !['p1', 'p2', 'p3'].includes(p.id))
+          .map((p: any) => p.id?.startsWith('admin_sub_') ? { ...p, name: 'admin_subscription' } : p);
         set({ playlists: loadedPlaylists });
       } else {
         set({ playlists: [] });
       }
 
-      if (isBackendAuthorized && storedUser && loadedPlaylists.length > 0) {
+      if (!get().isAppLocked && isBackendAuthorized && storedUser && loadedPlaylists.length > 0) {
         updates.isLoggedIn = true;
         updates.user = JSON.parse(storedUser);
       } else {
@@ -1704,7 +2136,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       // Fetch custom M3U playlists from the server if we have device data
       try {
-        const plRes = await fetch(`${SERVER_URL}/portal/playlists?macAddress=${deviceData.macAddress}&deviceKey=${deviceData.deviceKey}`);
+        const plRes = await fetchWithTimeout(`${SERVER_URL}/portal/playlists?macAddress=${deviceData.macAddress}&deviceKey=${deviceData.deviceKey}`, {}, 5000);
         if (plRes.ok) {
           const serverPlaylists = await plRes.json();
           await get().syncM3uPlaylists(serverPlaylists);
@@ -1715,7 +2147,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       const activeId = await AsyncStorage.getItem('activePlaylistId');
       let finalActiveId = '';
-      if (activeId && loadedPlaylists.some(p => p.id === activeId)) {
+      if (activeId && !['p1', 'p2', 'p3'].includes(activeId) && loadedPlaylists.some(p => p.id === activeId)) {
         finalActiveId = activeId;
         set({ activePlaylistId: activeId });
         const cachedCats = await AsyncStorage.getItem(`categories_${activeId}`);
@@ -1731,23 +2163,44 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({ activePlaylistId: '', activeCategories: null });
       }
 
-      // Auto-load search index for active playlist on start
       if (finalActiveId) {
         try {
-          get().loadSearchIndex(finalActiveId).then(() => {
-            if (globalSearchIndex.length === 0) {
-              get().buildSearchIndex(finalActiveId).catch(() => {});
+          const cachedCounts = await AsyncStorage.getItem(`category_counts_${finalActiveId}`);
+          if (cachedCounts) {
+            set({ categoryCounts: JSON.parse(cachedCounts) });
+          } else {
+            const cachedSearchIdx = await AsyncStorage.getItem(`search_index_${finalActiveId}`);
+            if (cachedSearchIdx) {
+              const parsed = JSON.parse(cachedSearchIdx);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                globalSearchIndex = parsed;
+                set({ searchIndexReady: true });
+                get().computeAndSetCategoryCounts(parsed);
+              }
             }
-          }).catch(err => {
-            console.error('[initializeFromStorage] Failed loading search index:', err);
-          });
-        } catch (err) {
-          console.error('[initializeFromStorage] Error triggering search index:', err);
+          }
+        } catch (e) {
+          console.warn('Failed loading category counts on init', e);
         }
       }
 
       const favsStr = await AsyncStorage.getItem('favorites');
       if (favsStr) set({ favorites: JSON.parse(favsStr) });
+
+      // Initialize network connectivity monitoring
+      networkManager.init((isOnline) => {
+        set({ isNetworkOnline: isOnline });
+        if (isOnline) {
+          console.log('[AppStore] Internet connection restored! Triggering content refresh...');
+          set((s) => ({ refreshCounter: (s.refreshCounter || 0) + 1 }));
+          get().checkAuthStatus();
+          get().setupSseConnection();
+          get().showToast('الاتصال بالإنترنت', 'تمت استعادة الاتصال بالإنترنت بنجاح', 'success');
+        } else {
+          console.log('[AppStore] Internet connection lost.');
+          get().showToast('انقطاع الاتصال', 'انقطع الاتصال بالإنترنت، يرجى التحقق من الشبكة', 'warning');
+        }
+      });
       const itemsStr = await AsyncStorage.getItem('favoriteItems');
       if (itemsStr) set({ favoriteItems: JSON.parse(itemsStr) ?? [] });
 
@@ -1767,56 +2220,59 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!deviceId) return;
 
     let SERVER_URL = 'https://entecstreamingnestjs-production.up.railway.app/api';
-    if (__DEV__) {
-      const hostUri = Constants.expoConfig?.hostUri;
-      if (hostUri) {
-        const ip = hostUri.split(':')[0];
-        SERVER_URL = `http://${ip}:3000/api`;
-      } else {
-        SERVER_URL = Platform.OS === 'android' ? 'http://10.0.2.2:3000/api' : 'http://localhost:3000/api';
-      }
-      }
-
     const sseUrl = `${SERVER_URL}/client/events?macAddress=${deviceId}`;
     
     // Close existing connection if any
     const existingEs = (global as any).__appSseConnection;
-    if (existingEs) {
+    if (existingEs && typeof existingEs.close === 'function') {
       existingEs.close();
     }
 
-    const EventSourceConstructor = typeof window !== 'undefined' ? window.EventSource : (global as any).EventSource;
-    if (!EventSourceConstructor) {
-      console.warn('[SSE] EventSource is not supported on this platform natively.');
-      return;
-    }
-
-    const es = new EventSourceConstructor(sseUrl);
+    console.log(`[SSE] Connecting to real-time events for device: ${deviceId}`);
+    const es = createEventSource(sseUrl);
     (global as any).__appSseConnection = es;
 
     es.addEventListener('message', async (event: any) => {
       try {
-        const data = JSON.parse(event.data);
-        if (data && data.type === 'REFRESH') {
-          console.log('[SSE] Received REFRESH event. Refreshing app data...');
-          await get().checkAuthStatus();
+        let data = event.data;
+        if (typeof data === 'string') {
+          try { data = JSON.parse(data); } catch {}
+        }
+        if (data && (data.type === 'REFRESH' || data === 'REFRESH')) {
+          console.log('[SSE] Received REFRESH event. Triggering deep app refresh...');
+          
+          // 1. Clear memory caches
+          globalChannelsCache.clear();
+          globalSearchIndex = [];
+          set({ searchIndexReady: false });
+
+          // 2. Check auth status & force reload admin subscriptions
+          await get().checkAuthStatus({ forceReload: true });
+
+          // 3. Refresh active playlist
           const currentPlaylistId = get().activePlaylistId;
           if (currentPlaylistId) {
             await get().refreshPlaylist(currentPlaylistId);
           }
+
+          // 4. Increment refresh counter to notify listening screens
+          set(s => ({ refreshCounter: (s.refreshCounter || 0) + 1 }));
+
+          // 5. Show user confirmation toast
+          get().showToast(
+            'تحديث التطبيق',
+            'تم تحديث بيانات التطبيق والقنوات من لوحة التحكم بنجاح',
+            'success'
+          );
         }
       } catch (err) {
-        console.warn('[SSE] Error parsing event data:', err);
+        console.warn('[SSE] Error handling event data:', err);
       }
     });
 
     es.addEventListener('error', (err: any) => {
-      console.log('[SSE] Connection error. Reconnecting...');
+      console.log('[SSE] Connection notice:', err);
     });
-  },
-
-  getChannelsByType: async (type) => {
-    return globalSearchIndex.filter(item => item.type === type);
   },
 
   loadSearchIndex: async (playlistId) => {
@@ -1825,17 +2281,36 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ searchIndexReady: false });
       return;
     }
+    if (globalSearchIndex.length > 0 && get().searchIndexReady) {
+      return;
+    }
     try {
+      // 1. Instant load from disk cache if available
+      const cached = await AsyncStorage.getItem(`search_index_${playlistId}`);
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            globalSearchIndex = parsed;
+            set({ searchIndexReady: true, loadingSearchIndex: false });
+            get().computeAndSetCategoryCounts(parsed);
+            console.log(`[loadSearchIndex] Loaded ${parsed.length} items from cache`);
+            return;
+          }
+        } catch (e) {}
+      }
+
       set({ loadingSearchIndex: true });
       await get().buildSearchIndex(playlistId);
     } catch (e) {
       console.error('Failed to load search index', e);
-      globalSearchIndex = [];
-      set({ searchIndexReady: false, loadingSearchIndex: false });
+      if (globalSearchIndex.length === 0) {
+        set({ searchIndexReady: false, loadingSearchIndex: false });
+      }
     }
   },
 
-    buildSearchIndex: async (playlistId, onProgress) => {
+  buildSearchIndex: async (playlistId, onProgress) => {
     set({ loadingSearchIndex: true, searchIndexReady: false });
     onProgress?.('Building search index...');
     
@@ -1848,13 +2323,16 @@ export const useAppStore = create<AppState>((set, get) => ({
         // Xtream Codes API: fetch all streams from server
         let config = null;
         if (playlist.url.startsWith('xtream://')) {
-          config = JSON.parse(atob(playlist.url.replace('xtream://', '')));
+          try {
+            config = JSON.parse(base64Decode(playlist.url.replace('xtream://', '')));
+          } catch(e) {}
         } else {
           const match = playlist.url.match(/^(https?:\/\/[^/]+)\/get\.php\?username=([^&]+)&password=([^&]+)/);
           if (match) config = { host: match[1], username: match[2], password: match[3] };
         }
         
         if (config) {
+          const hostClean = (config.host || '').endsWith('/') ? config.host.slice(0, -1) : (config.host || '');
           const catMap = new Map();
           const categories = get().activeCategories;
           if (categories) {
@@ -1874,52 +2352,36 @@ export const useAppStore = create<AppState>((set, get) => ({
             onProgress?.(`Fetching ${a.name} database...`);
             console.log(`[buildSearchIndex] Fetching ${a.action}...`);
             try {
-              const url = `${config.host}/player_api.php?username=${config.username}&password=${config.password}&action=${a.action}`;
+              const url = `${hostClean}/player_api.php?username=${config.username}&password=${config.password}&action=${a.action}`;
               let data: any = null;
               
-              try {
-                const res = await fetch(url, {
-                  headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                  }
-                });
-                if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-                data = await res.json();
-              } catch (fetchErr) {
-                console.warn(`[buildSearchIndex] Direct fetch failed for ${a.action}, trying proxies. Error: ${fetchErr}`);
-                const targetUrls = [
-                  url,
-                  `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
-                  `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`
-                ];
-                let text = '';
-                let fetched = false;
-                for (const u of targetUrls) {
-                  try {
-                    text = await new Promise((resolve, reject) => {
-                      const xhr = new XMLHttpRequest();
-                      xhr.open('GET', u, true);
-                      xhr.timeout = 30000;
-                      xhr.onload = () => {
-                        if (xhr.status >= 200 && xhr.status < 300) {
-                          if (xhr.responseText) resolve(xhr.responseText);
-                          else reject(new Error('Empty'));
-                        } else reject(new Error('Status ' + xhr.status));
-                      };
-                      xhr.onerror = () => reject(new Error('Network error'));
-                      xhr.ontimeout = () => reject(new Error('Timeout'));
-                      xhr.send();
-                    });
-                    fetched = true;
-                    break;
-                  } catch (e) { }
-                }
-                if (!fetched) throw new Error('Failed to fetch from all sources on web');
-                data = JSON.parse(text);
+              const isWeb = Platform.OS === 'web';
+              const targetUrls = isWeb ? [
+                `/proxy?url=${encodeURIComponent(url)}`,
+                url,
+                `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+                `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`
+              ] : [
+                url
+              ];
+              
+              let text = '';
+              let fetched = false;
+              for (const u of targetUrls) {
+                try {
+                  const timeout = a.type === 'vod' || a.type === 'series' ? 120000 : 30000;
+                  text = await fetchWithXHR(u, undefined, timeout);
+                  fetched = true;
+                  break;
+                } catch (e) { }
               }
+              
+              if (!fetched) throw new Error('Failed to fetch from all sources');
+              data = JSON.parse(text);
               
               console.log(`[buildSearchIndex] Parsed JSON for ${a.action}. Array length: ${Array.isArray(data) ? data.length : 'Not Array'}`);
               if (Array.isArray(data)) {
+                let batchCount = 0;
                 for (const item of data) {
                   if (!item || !item.name) continue;
 
@@ -1938,16 +2400,16 @@ export const useAppStore = create<AppState>((set, get) => ({
                   
                   if (a.type === 'live' && item.stream_id) {
                     const ext = get().moreOptions.useM3uFormatInStreamUrl ? '.m3u8' : (get().moreOptions.useExtensionInStreamUrl ? '.ts' : '');
-                    streamUrl = `${config.host}/live/${config.username}/${config.password}/${item.stream_id}${ext}`;
+                    streamUrl = `${hostClean}/live/${config.username}/${config.password}/${item.stream_id}${ext}`;
                     id = `xt_live_${item.stream_id}`;
                     logo = item.stream_icon || '';
                   } else if (a.type === 'vod' && item.stream_id) {
                     const ext = get().moreOptions.useExtensionInStreamUrl ? `.${item.container_extension || 'mp4'}` : '';
-                    streamUrl = `${config.host}/movie/${config.username}/${config.password}/${item.stream_id}${ext}`;
+                    streamUrl = `${hostClean}/movie/${config.username}/${config.password}/${item.stream_id}${ext}`;
                     id = `xt_vod_${item.stream_id}`;
                     logo = item.stream_icon || '';
                   } else if (a.type === 'series' && item.series_id) {
-                    streamUrl = `${config.host}/series/${config.username}/${config.password}/${item.series_id}`;
+                    streamUrl = `${hostClean}/series/${config.username}/${config.password}/${item.series_id}`;
                     id = `xt_series_${item.series_id}`;
                     logo = item.cover || '';
                   }
@@ -1971,9 +2433,16 @@ export const useAppStore = create<AppState>((set, get) => ({
                       archiveDuration
                     });
                   }
+
+                  batchCount++;
+                  if (batchCount % 300 === 0) {
+                    await new Promise(r => setTimeout(r, 0));
+                  }
                 }
               }
               console.log(`[buildSearchIndex] Successfully pushed ${a.action} to index.`);
+              globalSearchIndex = [...tempIndex];
+              set({ searchIndexReady: true });
             } catch (e) {
               console.warn(`[buildSearchIndex] Failed fetching ${a.action} for search index`, e);
             }
@@ -2014,12 +2483,146 @@ export const useAppStore = create<AppState>((set, get) => ({
       
       globalSearchIndex = tempIndex;
       set({ searchIndexReady: true, loadingSearchIndex: false });
+      get().computeAndSetCategoryCounts(tempIndex);
+
+      // Pre-cache channels by category so getChannelsForCategory returns in 0ms!
+      try {
+        const catMap = new Map<string, Channel[]>();
+        for (const item of tempIndex) {
+          if (item.categoryId) {
+            const key = `channels_v4_${playlistId}_${item.type}_${item.categoryId}`;
+            if (!catMap.has(key)) catMap.set(key, []);
+            catMap.get(key)!.push(item as Channel);
+          }
+        }
+        for (const [key, items] of catMap.entries()) {
+          globalChannelsCache.set(key, { data: items, timestamp: Date.now() });
+          AsyncStorage.setItem(key, JSON.stringify(items)).catch(() => {});
+        }
+      } catch (err) {
+        console.warn('Failed caching category channels:', err);
+      }
+
       onProgress?.('Search index ready!');
+      if (tempIndex.length > 0) {
+        AsyncStorage.setItem(`search_index_${playlistId}`, JSON.stringify(tempIndex)).catch(() => {});
+      }
     } catch (e) {
       console.error('Failed to build search index:', e);
-      globalSearchIndex = [];
-      set({ searchIndexReady: false, loadingSearchIndex: false });
+      if (globalSearchIndex.length === 0) {
+        set({ searchIndexReady: false, loadingSearchIndex: false });
+      } else {
+        set({ loadingSearchIndex: false });
+      }
       onProgress?.('Failed to build index.');
+    }
+  },
+
+  preloadFullPlaylistContent: async (playlistId, onProgress) => {
+    try {
+      const playlist = get().playlists.find(p => p.id === playlistId);
+      if (!playlist) {
+        console.warn(`[preloadFullPlaylistContent] Playlist ${playlistId} not found`);
+        return false;
+      }
+
+      console.log(`[preloadFullPlaylistContent] Preloading playlist: ${playlistId} (${playlist.name})`);
+      onProgress?.(10, 'جاري التحقق من القائمة والاتصال بالخادم...');
+
+      // Step 1: Verify credentials and fetch categories (10% -> 30%)
+      await get().loadPlaylistFromUrl(
+        playlistId, 
+        playlist.url, 
+        (msg) => onProgress?.(25, msg || 'جاري استيراد وتحديث الفئات...')
+      );
+
+      onProgress?.(35, 'تم استيراد الفئات، جاري مزامنة القنوات والمكتبة...');
+
+      // Step 2: Fetch all streams and build catalog & counts (35% -> 85%)
+      await get().buildSearchIndex(playlistId, (msg) => {
+        if (msg.includes('Live')) {
+          onProgress?.(50, 'جاري تحميل قنوات البث المباشر...');
+        } else if (msg.includes('Movies') || msg.includes('vod')) {
+          onProgress?.(68, 'جاري تحميل مكتبة الأفلام...');
+        } else if (msg.includes('Series')) {
+          onProgress?.(82, 'جاري تحميل مكتبة المسلسلات...');
+        } else {
+          onProgress?.(60, msg);
+        }
+      });
+
+      // Step 3: Preload Home content rows so (tabs)/index.tsx opens in 0ms (85% -> 98%)
+      onProgress?.(90, 'جاري تجهيز محتوى الصفحة الرئيسية...');
+      const activeCats = get().activeCategories;
+      if (activeCats) {
+        try {
+          const rows: any[] = [];
+          const heroPool: Channel[] = [];
+
+          const fetchAndAddRow = async (type: 'live' | 'vod' | 'series', category: any) => {
+            if (!category) return;
+            const items = await get().getChannelsForCategory(playlistId, type, category.id, category.name);
+            if (items && items.length > 0) {
+              if (type !== 'live') heroPool.push(...items);
+              const mapped = items.slice(0, 15).map(m => {
+                if (type === 'live') return m;
+                return {
+                  id: m.id,
+                  title: m.name,
+                  poster: m.logo || `https://ui-avatars.com/api/?name=${encodeURIComponent(m.name)}&background=1A1A1A&color=D4A843&bold=true&size=300&format=svg`,
+                  backdrop: m.logo,
+                  rating: 0,
+                  year: 0,
+                  duration: '',
+                  quality: m.quality,
+                  genres: [m.category],
+                  description: '',
+                  streamUrl: m.streamUrl,
+                };
+              });
+              rows.push({
+                title: category.name,
+                type,
+                categoryId: category.id,
+                items: mapped
+              });
+            }
+          };
+
+          for (const cat of (activeCats.live || []).slice(0, 2)) await fetchAndAddRow('live', cat);
+          for (const cat of (activeCats.vod || []).slice(0, 2)) await fetchAndAddRow('vod', cat);
+          for (const cat of (activeCats.series || []).slice(0, 2)) await fetchAndAddRow('series', cat);
+
+          const featured = heroPool.slice(0, 4).map(item => ({
+            id: item.id,
+            title: item.name,
+            subtitle: item.type === 'live' ? 'FEATURED LIVE TV' : item.type === 'series' ? 'FEATURED SERIES' : 'FEATURED MOVIE',
+            backdrop: { uri: item.logo || '' },
+            poster: { uri: item.logo || '' },
+            description: item.category || 'Featured Content',
+            rating: 8.5,
+            year: 2026,
+            duration: item.type === 'live' ? 'LIVE' : 'VOD',
+            genres: [item.category],
+            streamUrl: item.streamUrl,
+            originalItem: item
+          }));
+
+          if (rows.length > 0) {
+            get().setCachedHomeContent(playlistId, rows, featured);
+          }
+        } catch (e) {
+          console.warn('[preloadFullPlaylistContent] Home rows prefetch error:', e);
+        }
+      }
+
+      onProgress?.(100, 'اكتمل التحميل بنجاح! جاري الدخول...');
+      await new Promise(r => setTimeout(r, 600));
+      return true;
+    } catch (e: any) {
+      console.error('[preloadFullPlaylistContent] Error during preload:', e);
+      onProgress?.(100, 'اكتمل التحميل');
+      return false;
     }
   },
 }));

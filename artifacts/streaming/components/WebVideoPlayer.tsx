@@ -15,6 +15,10 @@ export interface WebVideoPlayerRef {
   exitFullscreen: () => void;
   togglePiP: () => Promise<void>;
   setVolume: (v: number) => void;
+  setMuted: (muted: boolean) => void;
+  toggleMute: () => boolean;
+  getMuted: () => boolean;
+  getVolume: () => number;
 }
 
 interface WebVideoPlayerProps {
@@ -32,10 +36,12 @@ interface WebVideoPlayerProps {
   preferredPlayer?: 'android' | 'exo';
   subtitleUrl?: string;
   onSubtitleChange?: (text: string) => void;
+  onMuteChange?: (isMuted: boolean) => void;
+  onVolumeChange?: (volume: number) => void;
 }
 
 export const WebVideoPlayer = forwardRef<WebVideoPlayerRef, WebVideoPlayerProps>(
-  ({ source, style, onProgress, onEnd, aspectMode = 0, paused = false, muted = false, controls = false, onReady, onError, onFullscreenExit, preferredPlayer = 'exo', subtitleUrl, onSubtitleChange }, ref) => {
+  ({ source, style, onProgress, onEnd, aspectMode = 0, paused = false, muted = false, controls = false, onReady, onError, onFullscreenExit, preferredPlayer = 'exo', subtitleUrl, onSubtitleChange, onMuteChange, onVolumeChange }, ref) => {
     const [internalSource, setInternalSource] = React.useState(source);
 
     useEffect(() => {
@@ -46,6 +52,19 @@ export const WebVideoPlayer = forwardRef<WebVideoPlayerRef, WebVideoPlayerProps>
     const hlsRef = useRef<any | null>(null);
     const transcodeOffset = useRef<number>(0);
     const parsedCues = useRef<{start: number, end: number, text: string}[]>([]);
+    const lastNonZeroVolume = useRef<number>(1);
+
+    // Sync muted prop with actual video element
+    useEffect(() => {
+      if (videoRef.current) {
+        if (videoRef.current.muted !== muted) {
+          videoRef.current.muted = muted;
+        }
+        if (!muted && videoRef.current.volume === 0) {
+          videoRef.current.volume = lastNonZeroVolume.current || 1;
+        }
+      }
+    }, [muted]);
 
     useImperativeHandle(ref, () => ({
       seek: (time: number) => {
@@ -102,9 +121,42 @@ export const WebVideoPlayer = forwardRef<WebVideoPlayerRef, WebVideoPlayerProps>
       },
       setVolume: (v: number) => {
         if (videoRef.current) {
-          videoRef.current.volume = Math.max(0, Math.min(1, v));
+          const val = Math.max(0, Math.min(1, v));
+          videoRef.current.volume = val;
+          if (val > 0) {
+            lastNonZeroVolume.current = val;
+          }
         }
-      }
+      },
+      setMuted: (m: boolean) => {
+        if (videoRef.current) {
+          videoRef.current.muted = m;
+          if (!m && videoRef.current.volume === 0) {
+            videoRef.current.volume = lastNonZeroVolume.current || 1;
+          }
+          onMuteChange?.(m);
+        }
+      },
+      toggleMute: () => {
+        if (videoRef.current) {
+          const isCurrentlyMuted = videoRef.current.muted || videoRef.current.volume === 0;
+          const next = !isCurrentlyMuted;
+          videoRef.current.muted = next;
+          if (!next && videoRef.current.volume === 0) {
+            videoRef.current.volume = lastNonZeroVolume.current || 1;
+          }
+          onMuteChange?.(next);
+          return next;
+        }
+        return false;
+      },
+      getMuted: () => {
+        if (videoRef.current) {
+          return videoRef.current.muted || videoRef.current.volume === 0;
+        }
+        return false;
+      },
+      getVolume: () => videoRef.current?.volume ?? 1
     }));
 
     const prevSourceProp = useRef(source);
@@ -156,9 +208,23 @@ export const WebVideoPlayer = forwardRef<WebVideoPlayerRef, WebVideoPlayerProps>
         }
       };
 
+      const handleVolumeChange = () => {
+        if (!videoRef.current) return;
+        const isEffectivelyMuted = videoRef.current.muted || videoRef.current.volume === 0;
+        if (videoRef.current.volume > 0) {
+          lastNonZeroVolume.current = videoRef.current.volume;
+        }
+        onMuteChange?.(isEffectivelyMuted);
+        onVolumeChange?.(videoRef.current.volume);
+      };
+
       video.addEventListener('timeupdate', handleTimeUpdate);
       video.addEventListener('ended', handleEnded);
       video.addEventListener('error', handleError);
+      video.addEventListener('volumechange', handleVolumeChange);
+
+      // Initial check
+      handleVolumeChange();
 
       let hls: any | null = null;
       let hlsRetryCount = 0;
@@ -172,15 +238,18 @@ export const WebVideoPlayer = forwardRef<WebVideoPlayerRef, WebVideoPlayerProps>
         hls = new Hls({
           debug: false,
           enableWorker: true,
-          lowLatencyMode: false,
-          liveBackBufferLength: 0,
-          backBufferLength: 90,
-          maxBufferLength: 30,
-          maxMaxBufferLength: 60,
-          maxBufferSize: 50 * 1000 * 1000,
+          lowLatencyMode: true,
+          liveBackBufferLength: 10,
+          backBufferLength: 60,
+          maxBufferLength: 20,
+          maxMaxBufferLength: 40,
+          maxBufferSize: 30 * 1000 * 1000,
           liveSyncDurationCount: 3,
-          liveMaxLatencyDurationCount: 15,
+          liveMaxLatencyDurationCount: 10,
           startFragPrefetch: true,
+          capLevelToPlayerSize: true,
+          fragLoadingMaxRetry: 4,
+          manifestLoadingMaxRetry: 4,
           testBandwidth: false,
         });
         hlsRef.current = hls;
@@ -209,9 +278,7 @@ export const WebVideoPlayer = forwardRef<WebVideoPlayerRef, WebVideoPlayerProps>
           if (!active) return; // stale handler — source has changed
           if (!paused) {
             video.play().catch(e => {
-              console.log('Autoplay prevented, trying muted autoplay', e.name, e.message);
-              video.muted = true;
-              video.play().catch(e2 => console.log('Muted autoplay also prevented', e2.name, e2.message));
+              console.log('[WebVideoPlayer] HLS playback play error / waiting for buffer:', e.name, e.message);
             });
           }
         });
@@ -227,16 +294,21 @@ export const WebVideoPlayer = forwardRef<WebVideoPlayerRef, WebVideoPlayerProps>
           finalUrl = window.location.origin + finalUrl;
         }
         
+        const isLiveStream = !targetUrl.includes('/proxy-vod');
         mpegtsPlayer = mpegts.createPlayer({
           type: 'mse',
-          isLive: !targetUrl.includes('/proxy-vod'),
+          isLive: isLiveStream,
           url: finalUrl,
         }, {
           enableWorker: true,
-          liveBufferLatencyChasing: false,
-          liveBufferLatencyMaxLatency: 10,
-          liveBufferLatencyMinRemain: 2,
           lazyLoad: false,
+          stashInitialSize: isLiveStream ? 64 * 1024 : 256 * 1024,
+          autoCleanupSourceBuffer: true,
+          autoCleanupMaxBackwardDuration: 30,
+          autoCleanupMinBackwardDuration: 15,
+          liveBufferLatencyChasing: isLiveStream,
+          liveBufferLatencyMaxLatency: 8,
+          liveBufferLatencyMinRemain: 1.5,
         });
         mpegtsPlayer.attachMediaElement(video);
         mpegtsPlayer.load();
@@ -249,9 +321,7 @@ export const WebVideoPlayer = forwardRef<WebVideoPlayerRef, WebVideoPlayerProps>
         if (!active) return;
         if (!paused) {
           mpegtsPlayer.play().catch((e: any) => {
-            console.log('Autoplay prevented, trying muted', e);
-            video.muted = true;
-            mpegtsPlayer?.play().catch((e2: any) => console.log('Muted also prevented', e2));
+            console.log('[WebVideoPlayer] mpegts play error / waiting for buffer:', e);
           });
         }
       };
@@ -260,6 +330,12 @@ export const WebVideoPlayer = forwardRef<WebVideoPlayerRef, WebVideoPlayerProps>
       let handleLoadedMetadata: (() => void) | null = null;
 
       const initPlayback = async () => {
+        if (video) {
+          video.muted = muted;
+          if (!muted && video.volume === 0) {
+            video.volume = lastNonZeroVolume.current || 1;
+          }
+        }
         const isVOD = internalSource.toLowerCase().includes('.mp4') || internalSource.toLowerCase().includes('.mkv') || internalSource.toLowerCase().includes('.avi');
         const isProxyLive = internalSource.includes('/proxy') && !internalSource.includes('/proxy-vod') && !internalSource.includes('.m3u8');
         const isProxyVOD = internalSource.includes('/proxy-vod');
@@ -284,9 +360,7 @@ export const WebVideoPlayer = forwardRef<WebVideoPlayerRef, WebVideoPlayerProps>
               if (!active) return;
               if (!paused) {
                 video.play().catch(e => {
-                  console.log('Autoplay prevented, trying muted autoplay', e.name, e.message);
-                  video.muted = true;
-                  video.play().catch(e2 => console.log('Muted autoplay also prevented', e2.name, e2.message));
+                  console.log('[WebVideoPlayer] Native video play error:', e.name, e.message);
                 });
               }
             };
@@ -333,9 +407,7 @@ export const WebVideoPlayer = forwardRef<WebVideoPlayerRef, WebVideoPlayerProps>
           if (!active) return;
           if (!paused) {
             video.play().catch(e => {
-              console.log('Autoplay prevented, trying muted autoplay', e.name, e.message);
-              video.muted = true;
-              video.play().catch(e2 => console.log('Muted autoplay also prevented', e2.name, e2.message));
+              console.log('[WebVideoPlayer] HLS playback play error / waiting for buffer:', e.name, e.message);
             });
           }
         };
@@ -346,6 +418,7 @@ export const WebVideoPlayer = forwardRef<WebVideoPlayerRef, WebVideoPlayerProps>
 
       const handlePlaying = () => {
         console.log('[FRONTEND]: [WebVideoPlayer] Video playing event fired!');
+        handleVolumeChange();
         if (onReady) onReady();
       };
       video.addEventListener('playing', handlePlaying);
@@ -361,8 +434,24 @@ export const WebVideoPlayer = forwardRef<WebVideoPlayerRef, WebVideoPlayerProps>
       document.addEventListener('mozfullscreenchange', handleFullscreenChange);
       document.addEventListener('msfullscreenchange', handleFullscreenChange);
 
+      const handleOnline = () => {
+        console.log('[WebVideoPlayer] Network connection restored. Auto-recovering player...');
+        try {
+          initPlayback();
+        } catch (e) {
+          console.warn('[WebVideoPlayer] Error on auto-recover:', e);
+        }
+      };
+
+      if (typeof window !== 'undefined') {
+        window.addEventListener('online', handleOnline);
+      }
+
       return () => {
         console.log('[FRONTEND]: [WebVideoPlayer] Cleanup running for source:', internalSource);
+        if (typeof window !== 'undefined') {
+          window.removeEventListener('online', handleOnline);
+        }
         active = false; // disable all pending async callbacks for this source
         if (retryTimeout) clearTimeout(retryTimeout);
         video.removeEventListener('timeupdate', handleTimeUpdate);
@@ -401,9 +490,7 @@ export const WebVideoPlayer = forwardRef<WebVideoPlayerRef, WebVideoPlayerProps>
         video.pause();
       } else {
         video.play().catch(e => {
-          console.log('Autoplay prevented, trying muted autoplay', e.name, e.message);
-          video.muted = true;
-          video.play().catch(e2 => console.log('Muted autoplay also prevented', e2.name, e2.message));
+          console.log('[WebVideoPlayer] Video play error:', e.name, e.message);
         });
       }
     }, [paused]);

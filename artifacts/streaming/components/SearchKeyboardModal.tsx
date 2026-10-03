@@ -23,6 +23,7 @@ export function SearchKeyboardModal({ visible, value, onChangeText, onClose, pla
   const [internalValue, setInternalValue] = useState(value);
   const { width } = useWindowDimensions();
   const isSmallScreen = width < 768 && !Platform.isTV;
+  const isWindowsWeb = Platform.OS === 'web';
 
   // Sync internal value when prop changes (if it changes from outside)
   useEffect(() => {
@@ -30,13 +31,13 @@ export function SearchKeyboardModal({ visible, value, onChangeText, onClose, pla
   }, [value]);
 
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || isWindowsWeb) return;
     
     return listenToRemoteKeyboard(remoteSessionId, (text) => {
       setInternalValue(text);
       onChangeText(text);
     });
-  }, [visible, remoteSessionId, onChangeText]);
+  }, [visible, remoteSessionId, onChangeText, isWindowsWeb]);
 
   const handleChangeText = (t: string) => {
     setInternalValue(t);
@@ -50,19 +51,32 @@ export function SearchKeyboardModal({ visible, value, onChangeText, onClose, pla
       <View style={[styles.contentRow, inline && { flexDirection: 'column', gap: 16 }, !inline && !isSmallScreen && { transform: [{ scale: 0.75 }] }]}>
         
         {/* Keyboard Section */}
-        <View style={{ width: inline || isSmallScreen ? '100%' : 480, maxWidth: isSmallScreen ? 600 : 480, paddingHorizontal: inline || isSmallScreen ? 16 : 0, alignSelf: 'center' }}>
+        <View style={{ width: inline || isSmallScreen || isWindowsWeb ? '100%' : 480, maxWidth: isSmallScreen || isWindowsWeb ? 600 : 480, paddingHorizontal: inline || isSmallScreen || isWindowsWeb ? 16 : 0, alignSelf: 'center', gap: 12 }}>
           <TextInput
             value={internalValue}
             onChangeText={handleChangeText}
-            placeholder={placeholder || 'Search...'}
+            placeholder={placeholder || 'search'}
             placeholderTextColor={colors.mutedForeground}
             style={[styles.placeholder, { color: colors.text, backgroundColor: colors.surface, borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12, borderWidth: 1, borderColor: colors.border }]}
             autoFocus={true}
-            showSoftInputOnFocus={isSmallScreen}
+            showSoftInputOnFocus={isSmallScreen || isWindowsWeb}
             onSubmitEditing={onClose}
             returnKeyType="search"
           />
-          {!isSmallScreen && (
+          {isWindowsWeb && (
+            <TVFocusable 
+              onPress={onClose}
+              style={({ focused }: any) => [
+                styles.closeBtn,
+                { backgroundColor: focused ? colors.gold : colors.surface, alignSelf: 'flex-end', paddingVertical: 8, paddingHorizontal: 20, borderWidth: 1, borderColor: colors.border, borderRadius: 10 }
+              ]}
+            >
+              {({ focused }: any) => (
+                <Text style={[styles.closeBtnText, { color: focused ? '#000' : colors.text }]}>{t('close') || 'Close'}</Text>
+              )}
+            </TVFocusable>
+          )}
+          {!isSmallScreen && !isWindowsWeb && (
             <TVKeyboard 
               value={internalValue}
               onChangeText={handleChangeText}
@@ -73,8 +87,8 @@ export function SearchKeyboardModal({ visible, value, onChangeText, onClose, pla
           )}
         </View>
         
-        {/* QR Code Section - Hidden on small screens */}
-        {!isSmallScreen && (
+        {/* QR Code Section - Hidden on small screens and Windows */}
+        {!isSmallScreen && !isWindowsWeb && (
           <View style={[styles.qrContainer, inline && { flexDirection: 'row', padding: 16, width: '100%', maxWidth: 480, justifyContent: 'space-between', alignItems: 'center' }, { backgroundColor: colors.surface, borderColor: colors.border, borderRadius: 14 }]}>
             {inline ? (
               <>

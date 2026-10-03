@@ -10,6 +10,7 @@ export interface TVFocusableProps extends Omit<PressableProps, 'style' | 'childr
   borderThickness?: number;
   focusedBorderColor?: string;
   disableBorder?: boolean;
+  focusZone?: string;
 }
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
@@ -21,6 +22,7 @@ export const TVFocusable = forwardRef<any, TVFocusableProps>(({
   borderThickness = 4,
   focusedBorderColor,
   disableBorder = false,
+  focusZone,
   onFocus,
   onBlur,
   onPressIn,
@@ -38,14 +40,17 @@ export const TVFocusable = forwardRef<any, TVFocusableProps>(({
 
   React.useEffect(() => {
     if (Platform.OS === 'web' && (props.hasTVPreferredFocus || (props as any).autoFocus)) {
-      // Small timeout to allow the element to fully mount and paint
       const timer = setTimeout(() => {
-        if (domRef.current) {
-          domRef.current.focus({ preventScroll: true });
-        } else if ((ref as any)?.current) {
-          (ref as any).current.focus({ preventScroll: true });
+        const el = domRef.current || (ref as any)?.current;
+        if (el && typeof el.focus === 'function') {
+          el.focus();
+          if (typeof el.scrollIntoView === 'function') {
+            try {
+              el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
+            } catch (e) {}
+          }
         }
-      }, 50);
+      }, 80);
       return () => clearTimeout(timer);
     }
   }, [props.hasTVPreferredFocus, (props as any).autoFocus]);
@@ -92,7 +97,7 @@ export const TVFocusable = forwardRef<any, TVFocusableProps>(({
         else if (ref) (ref as any).current = node;
       }}
       {...props}
-      {...(Platform.OS === 'web' && props.focusable !== false ? { tabIndex: 0 } : {})}
+      {...(Platform.OS === 'web' && props.focusable !== false ? { tabIndex: 0, focusable: true, 'data-focusable': 'true', ...(focusZone ? { 'data-focus-zone': focusZone } : {}) } as any : {})}
       onFocus={handleFocus}
       onBlur={handleBlur}
       onPressIn={handlePressIn}

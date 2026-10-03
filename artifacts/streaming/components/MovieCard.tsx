@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, Platform } from 'react-native';
 import { Image } from 'expo-image';
 import { Movie } from '@/types';
 import { QualityBadge } from './QualityBadge';
@@ -11,6 +11,7 @@ interface MovieCardProps {
   onPress: () => void;
   width?: number;
   autoFocus?: boolean;
+  isSelected?: boolean;
 }
 
 export const MovieCard = React.memo(function MovieCard({
@@ -18,6 +19,7 @@ export const MovieCard = React.memo(function MovieCard({
   onPress,
   width = 128,
   autoFocus,
+  isSelected,
 }: MovieCardProps) {
   const colors = useColors();
   const fallbackUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(movie.title || 'Movie')}&background=1D222B&color=F4C542&bold=true&size=300&format=svg`;
@@ -32,7 +34,7 @@ export const MovieCard = React.memo(function MovieCard({
   const handlePress = React.useCallback((e: any) => {
     if (isNavigating.current) return;
     isNavigating.current = true;
-    if (onPress) onPress(e);
+    if (onPress) (onPress as any)(e);
     setTimeout(() => { isNavigating.current = false; }, 1000);
   }, [onPress]);
 
@@ -43,24 +45,39 @@ export const MovieCard = React.memo(function MovieCard({
       scaleAmount={1.03}
       borderThickness={3}
       focusedBorderColor={colors.gold}
-      hasTVPreferredFocus={autoFocus}
+      hasTVPreferredFocus={autoFocus || isSelected}
+      nativeID={`card_${movie.id}`}
+      {...({ 
+        id: `card_${movie.id}`, 
+        'data-card-id': String(movie.id), 
+        'data-preferred-focus': (autoFocus || isSelected) ? 'true' : undefined 
+      } as any)}
     >
       {({ focused }: any) => (
         <View style={[
           styles.container,
-          focused && {
+          (focused || isSelected) && {
             shadowColor: colors.gold,
             shadowOffset: { width: 0, height: 8 },
-            shadowOpacity: 0.25,
+            shadowOpacity: 0.35,
             shadowRadius: 12,
             elevation: 8,
           }
         ]}>
-          <View style={[styles.posterContainer, { backgroundColor: colors.surface }]}>
+          <View style={[
+            styles.posterContainer, 
+            { backgroundColor: colors.surface },
+            isSelected && { borderColor: colors.gold, borderWidth: 2.5 }
+          ]}>
             <Image
-              source={{ uri: imgSource, headers: { 'User-Agent': 'Mozilla/5.0' } }}
+              source={{
+                uri: imgSource,
+                ...(Platform.OS !== 'web' ? { headers: { 'User-Agent': 'Mozilla/5.0' } } : {})
+              }}
               style={styles.poster}
               contentFit="cover"
+              cachePolicy="memory-disk"
+              transition={150}
               onError={() => {
                 if (imgSource !== fallbackUrl) setImgSource(fallbackUrl);
               }}
