@@ -2078,45 +2078,45 @@ export const useAppStore = create<AppState>((set, get) => ({
         isBackendAuthorized = storedUser ? true : false;
       }
 
-      if (storedLockedChannels) {
+      const safeJson = (val: string | null, fallback: any = null) => {
+        if (!val || typeof val !== 'string' || !val.trim()) return fallback;
         try {
-          updates.lockedChannels = JSON.parse(storedLockedChannels);
-        } catch (e) {
-          console.error("Failed to parse locked channels", e);
+          return JSON.parse(val);
+        } catch {
+          return fallback;
         }
-      }
-      if (storedFavs) updates.favorites = JSON.parse(storedFavs);
-      if (storedFavItems) updates.favoriteItems = JSON.parse(storedFavItems);
-      if (storedSettings) updates.settings = { ...get().settings, ...JSON.parse(storedSettings) };
+      };
+
+      if (storedLockedChannels) updates.lockedChannels = safeJson(storedLockedChannels, []);
+      if (storedFavs) updates.favorites = safeJson(storedFavs, []);
+      if (storedFavItems) updates.favoriteItems = safeJson(storedFavItems, []);
+      if (storedSettings) updates.settings = { ...get().settings, ...safeJson(storedSettings, {}) };
       if (storedContinueWatching) {
-        try {
-          const parsed = JSON.parse(storedContinueWatching);
-          if (Array.isArray(parsed)) {
-            updates.continueWatching = parsed.map(item => ({
-              ...item,
-              title: item.title || item.name || 'Unknown Title',
-              poster: item.poster || item.logo || item.thumbnail || '',
-              backdrop: item.backdrop || item.poster || item.logo || '',
-            })).filter(item => item.id && item.streamUrl);
-          }
-        } catch (e) {
-          console.warn('Failed to parse continueWatching', e);
+        const parsed = safeJson(storedContinueWatching, []);
+        if (Array.isArray(parsed)) {
+          updates.continueWatching = parsed.map(item => ({
+            ...item,
+            title: item.title || item.name || 'Unknown Title',
+            poster: item.poster || item.logo || item.thumbnail || '',
+            backdrop: item.backdrop || item.poster || item.logo || '',
+          })).filter(item => item.id && item.streamUrl);
         }
       }
-      if (storedDownloads) updates.downloads = JSON.parse(storedDownloads);
-      if (storedCatPrefs) updates.categoryPreferences = JSON.parse(storedCatPrefs);
-      if (storedLazyLoad !== null) updates.lazyLoadContent = JSON.parse(storedLazyLoad);
-      if (storedAutoPlay !== null) updates.autoPlayOnStartup = JSON.parse(storedAutoPlay);
-      if (storedLastWatched !== null) updates.lastWatchedChannel = JSON.parse(storedLastWatched);
-      if (storedMoreOptions) updates.moreOptions = { ...get().moreOptions, ...JSON.parse(storedMoreOptions) };
+      if (storedDownloads) updates.downloads = safeJson(storedDownloads, []);
+      if (storedCatPrefs) updates.categoryPreferences = safeJson(storedCatPrefs, {});
+      if (storedLazyLoad !== null) updates.lazyLoadContent = safeJson(storedLazyLoad, true);
+      if (storedAutoPlay !== null) updates.autoPlayOnStartup = safeJson(storedAutoPlay, false);
+      if (storedLastWatched !== null) updates.lastWatchedChannel = safeJson(storedLastWatched, null);
+      if (storedMoreOptions) updates.moreOptions = { ...get().moreOptions, ...safeJson(storedMoreOptions, {}) };
       if (storedParentalPin !== null) updates.parentalPin = storedParentalPin;
 
       set(updates as any);
 
       const playlistsStr = await AsyncStorage.getItem('playlists');
       let loadedPlaylists: Playlist[] = [];
-      if (playlistsStr) {
-        loadedPlaylists = JSON.parse(playlistsStr)
+      const parsedPlaylists = safeJson(playlistsStr, []);
+      if (Array.isArray(parsedPlaylists) && parsedPlaylists.length > 0) {
+        loadedPlaylists = parsedPlaylists
           .filter((p: any) => !p.isDemo && !p.url?.startsWith('demo://') && !['p1', 'p2', 'p3'].includes(p.id))
           .map((p: any) => p.id?.startsWith('admin_sub_') ? { ...p, name: 'admin_subscription' } : p);
         set({ playlists: loadedPlaylists });
@@ -2124,9 +2124,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({ playlists: [] });
       }
 
-      if (!get().isAppLocked && isBackendAuthorized && storedUser && loadedPlaylists.length > 0) {
+      const parsedUser = safeJson(storedUser, null);
+      if (!get().isAppLocked && isBackendAuthorized && parsedUser && loadedPlaylists.length > 0) {
         updates.isLoggedIn = true;
-        updates.user = JSON.parse(storedUser);
+        updates.user = parsedUser;
       } else {
         updates.isLoggedIn = false;
         updates.user = null;
