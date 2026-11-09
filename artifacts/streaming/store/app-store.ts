@@ -1846,7 +1846,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   checkAuthStatus: async (options) => {
     try {
       const deviceData = await getOrCreateDeviceData();
-      let SERVER_URL = 'https://entecstreamingnestjs-production.up.railway.app/api';
+      let SERVER_URL = 'https://streamingnest-production.up.railway.app/api';
 
       const response = await fetch(`${SERVER_URL}/client/auth`, {
         method: 'POST',
@@ -1914,7 +1914,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   sendHeartbeatPing: async () => {
     try {
       const deviceData = await getOrCreateDeviceData();
-      const SERVER_URL = 'https://entecstreamingnestjs-production.up.railway.app/api';
+      const SERVER_URL = 'https://streamingnest-production.up.railway.app/api';
       const response = await fetch(`${SERVER_URL}/client/ping`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -1971,7 +1971,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         deviceKey: deviceData.deviceKey,
       };
 
-      let SERVER_URL = 'https://entecstreamingnestjs-production.up.railway.app/api';
+      let SERVER_URL = 'https://streamingnest-production.up.railway.app/api';
       
       // Use live server unconditionally per user request
       // if (__DEV__) {
@@ -2220,7 +2220,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { deviceId } = get();
     if (!deviceId) return;
 
-    let SERVER_URL = 'https://entecstreamingnestjs-production.up.railway.app/api';
+    let SERVER_URL = 'https://streamingnest-production.up.railway.app/api';
     const sseUrl = `${SERVER_URL}/client/events?macAddress=${deviceId}`;
     
     // Close existing connection if any

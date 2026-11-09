@@ -49,7 +49,7 @@ class NetworkManager {
     const testUrls = [
       'https://clients3.google.com/generate_204',
       'https://www.cloudflare.com/cdn-cgi/trace',
-      'https://entecstreamingnestjs-production.up.railway.app/api/client/ping',
+      'https://streamingnest-production.up.railway.app/api/client/ping',
     ];
 
     for (const url of testUrls) {

@@ -10,7 +10,7 @@ import { StartupPreloader } from '@/components/StartupPreloader';
 import { PlatformLogos } from '@/components/PlatformLogos';
 import * as Clipboard from 'expo-clipboard';
 
-let SERVER_URL = 'https://entecstreamingnestjs-production.up.railway.app/api';
+let SERVER_URL = 'https://streamingnest-production.up.railway.app/api';
 
 const fetchWithTimeout = (url: string, options: any = {}, timeoutMs: number = 5000) => {
   return Promise.race([
